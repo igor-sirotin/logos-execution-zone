@@ -65,6 +65,9 @@ pub enum LeeError {
     #[error("Circuit proving error")]
     CircuitProvingError(String),
 
+    #[error("Failed to resolve an account's shard: {0}")]
+    AccountResolution(String),
+
     #[error("Invalid program bytecode")]
     InvalidProgramBytecode(#[source] anyhow::Error),
 

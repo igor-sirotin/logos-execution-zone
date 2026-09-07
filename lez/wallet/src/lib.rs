@@ -27,7 +27,7 @@ use lee::{
 };
 use lee_core::{
     BlockId, Commitment, CommitmentSetDigest, MembershipProof, SharedSecretKey,
-    account::{Input, Nonce},
+    account::{Input, Nonce, Position},
     program::InstructionData,
 };
 use log::warn;
@@ -835,17 +835,43 @@ impl WalletCore {
         tx_pre_check(&acc_manager.pre_states())?;
 
         let private_account_keys = acc_manager.private_account_keys();
-        let (output, proof) = lee::privacy_preserving_transaction::circuit::execute_and_prove(
-            ProvingInput {
-                positions: acc_manager.positions(),
-                signers: acc_manager.signers(),
-                public_accounts: acc_manager.public_accounts(),
-                private_witnesses: acc_manager.private_witnesses(),
-                instruction_data,
-                dummy_inputs: acc_manager.dummy_inputs_default(),
-            },
-            program,
-        )?;
+        let input = ProvingInput {
+            positions: acc_manager.positions(),
+            signers: acc_manager.signers(),
+            public_accounts: acc_manager.public_accounts(),
+            private_witnesses: acc_manager.private_witnesses(),
+            instruction_data,
+            dummy_inputs: acc_manager.dummy_inputs_default(),
+        };
+
+        // Proving takes minutes, so it runs on the blocking pool rather than an async worker;
+        // `Handle::block_on` from such a thread is Tokio's documented bridge back to the runtime
+        // the resolver's RPC needs.
+        let handle = tokio::runtime::Handle::current();
+        let client = self.multi_sequencer_client.clone();
+        let program = program.clone();
+        let (output, proof) = tokio::task::spawn_blocking(move || {
+            lee::privacy_preserving_transaction::circuit::execute_and_prove_with(
+                input,
+                &program,
+                // Asked once per position, and only for one nothing in the transaction covers —
+                // the traversal owns that decision, so there is no coverage state here.
+                &mut |position: Position| {
+                    let (_, view) = handle
+                        .block_on(client.metered_get(async |client: &SequencerClient| {
+                            client
+                                .get_account_view(position.account_id, position.program)
+                                .await
+                        }))
+                        .map_err(|e| lee::error::LeeError::AccountResolution(e.to_string()))?;
+                    // A present account's projection carries the requested key even when its
+                    // shard is empty; an absent account projects to no entries at all. Either
+                    // way this is empty `Data`.
+                    Ok(Some(view.shards.into_values().next().unwrap_or_default()))
+                },
+            )
+        })
+        .await??;
 
         let message = lee::privacy_preserving_transaction::message::Message::from_circuit_output(
             acc_manager.public_account_nonces(),

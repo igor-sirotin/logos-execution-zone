@@ -4,7 +4,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use lee_core::{
     DummyInput, PrivacyPreservingCircuitInput, PrivacyPreservingCircuitOutput, PrivateWitness,
     ProgramImageClaim, WitnessKind,
-    account::{Account, AccountId, Input, Position},
+    account::{Account, AccountId, Data, Input, Position},
     from_frame,
     program::{ChainedCall, InstructionData, ProgramOutput, compute_public_authorized_pdas},
     to_frame,
@@ -98,6 +98,21 @@ pub fn execute_and_prove(
     input: ProvingInput,
     program_with_dependencies: &ProgramWithDependencies,
 ) -> Result<(PrivacyPreservingCircuitOutput, Proof), LeeError> {
+    execute_and_prove_with(input, program_with_dependencies, &mut |_| Ok(None))
+}
+
+// As [`execute_and_prove`], for a caller that supplied only part of a public account's shards:
+// `resolve` supplies the one shard a chained call opens that nothing in this transaction has
+// covered. When to ask is the traversal's decision, not the caller's: it asks at most once per
+// position, and never for one an input account or an applied diff already holds. `Some(data)`
+// merges an external value, `None` means the caller has no external source and the materialized
+// value stands — so a caller passing complete accounts answers `None` to everything and gets
+// exactly [`execute_and_prove`]'s behaviour.
+pub fn execute_and_prove_with(
+    input: ProvingInput,
+    program_with_dependencies: &ProgramWithDependencies,
+    resolve: &mut dyn FnMut(Position) -> Result<Option<Data>, LeeError>,
+) -> Result<(PrivacyPreservingCircuitOutput, Proof), LeeError> {
     let ProvingInput {
         positions,
         signers,
@@ -172,6 +187,12 @@ pub fn execute_and_prove(
     // Accounts the traversal has already reached, so a later sighting is not a first one.
     let mut seen: HashSet<AccountId> = HashSet::new();
 
+    // Positions whose value this transaction already holds: every top-level mention, plus every
+    // position an applied diff has since written. Coverage has exactly one owner, here, because
+    // a caller cannot see the positions an output diff introduces — asking it to track them is
+    // how an in-transaction write gets overwritten by a stale chain read.
+    let mut covered: HashSet<Position> = positions.iter().copied().collect();
+
     let top_level_pre_states: Vec<Input> = positions
         .iter()
         .map(|position| {
@@ -220,16 +241,30 @@ pub fn execute_and_prove(
             let mut resolved = Vec::with_capacity(chained_call.positions.len());
             for position in &chained_call.positions {
                 let account_id = position.account_id;
-                let account = materialized
-                    .get(&account_id)
-                    .ok_or(InvalidProgramBehaviorError::UnknownChainedCallAccount { account_id })?;
-
                 let is_authorized = caller_authorized_accounts.contains(&account_id)
                     || globally_authorized.contains(&account_id)
                     || authorized_pdas.contains(&account_id)
                     || seed_derives_private_pda(&account_id);
+                let witnessed = witness_at(&account_id).is_some();
 
-                resolved.push(Input::at(*position, is_authorized, account));
+                let account = materialized
+                    .get_mut(&account_id)
+                    .ok_or(InvalidProgramBehaviorError::UnknownChainedCallAccount { account_id })?;
+
+                // A private account's witness carries every namespace, so only a public account
+                // can reach a namespace nothing here has supplied. `covered` decides: `insert`
+                // is true exactly once per position, so a namespace an earlier call wrote — or
+                // an earlier resolution filled — is never asked for, and an external value can
+                // never land on top of this transaction's own write.
+                if !witnessed
+                    && let Some(namespace) = position.program
+                    && covered.insert(*position)
+                    && let Some(data) = resolve(*position)?
+                {
+                    account.set_shard(namespace, data);
+                }
+
+                resolved.push(Input::at(*position, is_authorized, &*account));
                 seen.insert(account_id);
             }
             resolved
@@ -272,6 +307,8 @@ pub fn execute_and_prove(
                 .or_default()
                 .splice(diff)
                 .map_err(InvalidProgramBehaviorError::BalanceDiffFailed)?;
+            covered.insert(Position::from(pre));
+
             if pre.is_authorized {
                 authorized_output_accounts.insert(account_id);
                 // Only a first-sighted, non-pda-matched account is a "regular account
