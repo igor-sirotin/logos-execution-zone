@@ -14,7 +14,8 @@ pub use privacy_preserving_circuit::{
     PRIVACY_PRESERVING_CIRCUIT_ELF, PRIVACY_PRESERVING_CIRCUIT_ID,
 };
 pub use privacy_preserving_transaction::{
-    PrivacyPreservingTransaction, circuit::execute_and_prove,
+    PrivacyPreservingTransaction,
+    circuit::{ProvingInput, execute_and_prove},
 };
 pub use public_transaction::PublicTransaction;
 pub use signature::{PrivateKey, PublicKey, Signature};
