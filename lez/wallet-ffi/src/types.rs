@@ -809,12 +809,14 @@ mod tests {
 
         let private_reg_acc_id =
             AccountId::for_private_account(&npk, &vpk, &PrivateAccountKind::Regular(identifier));
+        let pda_authority = AccountId::new([46; 32]);
+        let pda_seed = PdaSeed::new([47; 32]);
         let private_pda_acc_id = AccountId::for_private_account(
             &npk,
             &vpk,
             &PrivateAccountKind::Pda {
-                account_id: AccountId::new([46; 32]),
-                seed: PdaSeed::new([47; 32]),
+                account_id: pda_authority,
+                seed: pda_seed,
                 identifier,
             },
         );
@@ -833,9 +835,15 @@ mod tests {
             vpk: vpk.clone(),
             identifier,
         };
-        let acc_identity_5 = AccountIdentity::PrivatePdaOwned(private_pda_acc_id);
+        let acc_identity_5 = AccountIdentity::PrivatePdaOwned {
+            account_id: private_pda_acc_id,
+            authority: pda_authority,
+            seed: pda_seed,
+        };
         let acc_identity_6 = AccountIdentity::PrivatePdaForeign {
             account_id: private_pda_acc_id,
+            authority: pda_authority,
+            seed: pda_seed,
             npk,
             vpk: vpk.clone(),
             identifier,
@@ -847,6 +855,8 @@ mod tests {
         };
         let acc_identity_8 = AccountIdentity::PrivatePdaShared {
             account_id: private_pda_acc_id,
+            authority: pda_authority,
+            seed: pda_seed,
             nsk,
             vpk,
             identifier,
@@ -935,6 +945,8 @@ mod tests {
         };
         let pda_shared = AccountIdentity::PrivatePdaShared {
             account_id: AccountId::new([46; 32]),
+            authority: AccountId::new([48; 32]),
+            seed: PdaSeed::new([49; 32]),
             nsk,
             vpk,
             identifier,

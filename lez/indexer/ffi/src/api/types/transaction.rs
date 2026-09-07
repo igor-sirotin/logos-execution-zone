@@ -602,7 +602,10 @@ mod tests {
             hash: HashType([1; 32]),
             message: PublicMessage {
                 program_id: ProgramId([2; 8]),
-                account_ids: vec![AccountId { value: [3; 32] }],
+                positions: vec![Position {
+                    account_id: AccountId { value: [3; 32] },
+                    program: None,
+                }],
                 nonces: vec![],
                 instruction_data: vec![9, 9],
                 fee,

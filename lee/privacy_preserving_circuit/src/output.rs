@@ -205,9 +205,192 @@ fn compute_update_nullifier_and_set_digest(
 mod tests {
     use std::collections::HashMap;
 
-    use lee_core::{DUMMY_COMMITMENT_HASH, EphemeralPublicKey};
+    use lee_core::{
+        AuthorizationSecretKey, DUMMY_COMMITMENT_HASH, EphemeralPublicKey, NullifierPublicKey,
+        PublicAction,
+        account::{AccountView, Data},
+    };
 
     use super::*;
+
+    const SHARD_A: AccountId = AccountId::new([10; 32]);
+    const SHARD_B: AccountId = AccountId::new([11; 32]);
+    const SHARD_C: AccountId = AccountId::new([12; 32]);
+
+    /// A private account with a spendable credential, addressed the way the circuit derives it.
+    struct Owner {
+        ask: AuthorizationSecretKey,
+        seed: [u8; 32],
+        vpk: ViewingPublicKey,
+    }
+
+    impl Owner {
+        fn new(tag: u8) -> Self {
+            Self {
+                ask: AuthorizationSecretKey([tag; 32]),
+                seed: [tag; 32],
+                vpk: ViewingPublicKey::from_seed(&[tag; 32], &[tag; 32]),
+            }
+        }
+
+        fn nsk(&self) -> NullifierSecretKey {
+            NullifierSecretKey::from(&self.ask)
+        }
+
+        fn account_id(&self) -> AccountId {
+            AccountId::for_regular_private_account(
+                &NullifierPublicKey::from(&self.nsk()),
+                &self.vpk,
+                0,
+            )
+        }
+
+        /// An update witness over an account that already exists, which is what a funded account
+        /// is spent by. The membership proof is only hashed into the emitted root here; the
+        /// verifier is what checks that root against the set.
+        fn update_witness(&self, account: Account) -> PrivateWitness {
+            PrivateWitness {
+                account,
+                vpk: self.vpk.clone(),
+                random_seed: [0; 32],
+                identifier: 0,
+                kind: WitnessKind::Regular {
+                    ask: Some(self.ask),
+                },
+                nullifier: NullifierWitness::Update {
+                    view_tag: 0,
+                    nsk: self.nsk(),
+                    membership_proof: (0, Vec::new()),
+                },
+            }
+        }
+
+        /// The note as its recipient reads it: the shared secret recovered from the emitted
+        /// ciphertext, exactly as a wallet scan does.
+        fn decrypt(&self, action: &PrivateAction) -> (PrivateAccountKind, Account) {
+            let shared_secret = SharedSecretKey::decapsulate(
+                &action.encrypted_post_state.epk,
+                &self.seed,
+                &self.seed,
+            )
+            .expect("the emitted epk is a well-formed ML-KEM ciphertext");
+            EncryptionScheme::decrypt(
+                &action.encrypted_post_state.ciphertext,
+                &shared_secret,
+                &action.nullifier,
+            )
+            .expect("the note decrypts under the recipient's viewing key")
+        }
+    }
+
+    fn data(bytes: &[u8]) -> Data {
+        bytes.to_vec().try_into().expect("test data is small")
+    }
+
+    fn emit(
+        public: Vec<(AccountId, bool, AccountView, Account)>,
+        private: Vec<(AccountId, Account)>,
+        witnesses: &[PrivateWitness],
+    ) -> PrivacyPreservingCircuitOutput {
+        compute_circuit_output(
+            ExecutionState::from_tracked(public, private),
+            witnesses,
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    /// A commitment covers the whole account, so one witness emits one note carrying every
+    /// namespace — the rewritten one and the untouched one the guest never saw alike.
+    #[test]
+    fn one_note_per_private_account_carries_its_touched_shards() {
+        let owner = Owner::new(3);
+        let account = Account {
+            balance: 100,
+            nonce: Nonce(7),
+            ..Account::default()
+        }
+        .with_shard(SHARD_A, data(b"a"))
+        .with_shard(SHARD_B, data(b"b"));
+        let spliced = Account {
+            balance: 60,
+            ..account.clone()
+        }
+        .with_shard(SHARD_B, data(b"b-rewritten"));
+
+        let output = emit(
+            Vec::new(),
+            vec![(owner.account_id(), spliced.clone())],
+            &[owner.update_witness(account.clone())],
+        );
+
+        assert_eq!(output.private_actions.len(), 1, "one account, one note");
+        let expected = Account {
+            nonce: account.nonce.private_account_nonce_increment(&owner.nsk()),
+            ..spliced
+        };
+        let action = &output.private_actions[0];
+        assert_eq!(
+            owner.decrypt(action),
+            (PrivateAccountKind::Regular(0), expected.clone())
+        );
+        assert_eq!(
+            action.commitment,
+            Commitment::new(&owner.account_id(), &expected)
+        );
+    }
+
+    /// The journal reports the namespaces the transaction touched and no others, so a namespace
+    /// the verifier never handed over is left for it to keep.
+    #[test]
+    fn public_action_post_is_projected_onto_the_touched_namespaces() {
+        let account_id = AccountId::new([9; 32]);
+        let pre = AccountView {
+            balance: 10,
+            shards: [(SHARD_A, data(b"a"))].into(),
+        };
+        let tracked = Account {
+            balance: 7,
+            ..Account::default()
+        }
+        .with_shard(SHARD_A, data(b"a-rewritten"))
+        .with_shard(SHARD_C, data(b"c"));
+
+        let output = emit(
+            vec![(account_id, true, pre.clone(), tracked)],
+            Vec::new(),
+            &[],
+        );
+
+        assert_eq!(
+            output.public_actions,
+            vec![PublicAction {
+                account_id,
+                is_authorized: true,
+                pre,
+                post: AccountView {
+                    balance: 7,
+                    shards: [(SHARD_A, data(b"a-rewritten"))].into(),
+                },
+            }]
+        );
+    }
+
+    /// A witness names an account to spend and re-create. One the execution never touched has no
+    /// state to carry into its note.
+    #[test]
+    #[should_panic(expected = "Every witness's account must be touched by the execution")]
+    fn an_untouched_witness_is_rejected() {
+        let owner = Owner::new(4);
+
+        let output = emit(
+            Vec::new(),
+            Vec::new(),
+            &[owner.update_witness(Account::default())],
+        );
+
+        unreachable!("an untouched witness must panic, got {output:?}");
+    }
 
     fn note(tag: u8) -> PrivateAction {
         let nullifier = Nullifier::for_dummy(&[tag; 32]);

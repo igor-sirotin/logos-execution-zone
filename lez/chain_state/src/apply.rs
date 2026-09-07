@@ -641,10 +641,9 @@ mod tests {
         }
 
         let fee_state = fee_core::state::FeeState::from_bytes(
-            &state
+            state
                 .get_account_by_id(system_accounts::fee_state_account_id())
-                .data
-                .into_inner(),
+                .shard(system_accounts::fee_program_id()),
         );
         // Five blocks applied: height tracks the chain; zero load holds the floor.
         assert_eq!(fee_state.height, 5);
@@ -731,7 +730,7 @@ mod tests {
         // stake a real sequencer holds before producing, so the charged blocks
         // below can credit it (crediting an unclaimed account is rejected).
         let mut state =
-            initial_state(true).with_public_accounts([common::test_utils::claimed_producer_seed()]);
+            initial_state(true).with_public_accounts([common::test_utils::producer_seed()]);
         let accounts = initial_pub_accounts_private_keys();
         let from = accounts[0].account_id;
         let to = accounts[1].account_id;
@@ -801,10 +800,9 @@ mod tests {
         let recipient = accounts[1].account_id;
 
         let opening = FeeState::from_bytes(
-            &state
+            state
                 .get_account_by_id(system_accounts::fee_state_account_id())
-                .data
-                .into_inner(),
+                .shard(system_accounts::fee_program_id()),
         );
 
         // Accrue real revenue in the inbox with one legitimate charged transfer.
@@ -827,7 +825,10 @@ mod tests {
             .program_account_id;
         let message = lee::public_transaction::Message::try_new_with_fees(
             fee_program_id,
-            vec![system_accounts::fee_inbox_account_id(), attacker],
+            vec![
+                lee::Position::balance_only(system_accounts::fee_inbox_account_id()),
+                lee::Position::balance_only(attacker),
+            ],
             vec![state.get_account_by_id(attacker).nonce],
             fee_core::Instruction::Refund {
                 amount: inbox_revenue,
@@ -863,10 +864,9 @@ mod tests {
         let recipient = accounts[1].account_id;
 
         let opening = FeeState::from_bytes(
-            &state
+            state
                 .get_account_by_id(system_accounts::fee_state_account_id())
-                .data
-                .into_inner(),
+                .shard(system_accounts::fee_program_id()),
         );
         let sender_before = state.get_account_by_id(sender).balance;
         let recipient_before = state.get_account_by_id(recipient).balance;
@@ -902,10 +902,9 @@ mod tests {
         let recipient = accounts[1].account_id;
 
         let opening = FeeState::from_bytes(
-            &state
+            state
                 .get_account_by_id(system_accounts::fee_state_account_id())
-                .data
-                .into_inner(),
+                .shard(system_accounts::fee_program_id()),
         );
 
         let payer_before = state.get_account_by_id(payer).balance;

@@ -121,7 +121,7 @@ impl crate::fees::SignedMessage for Message {
 
 #[cfg(test)]
 mod tests {
-    use lee_core::account::{AccountId, Nonce};
+    use lee_core::account::{AccountId, Nonce, Position};
     use sha2::{Digest as _, Sha256};
 
     use super::{Message, PREFIX};
@@ -133,33 +133,53 @@ mod tests {
         1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0,
         0, 0,
     ];
-    // account_ids: u32 len=1, then AccountId([42_u8; 32])
-    const ACCOUNT_IDS_BYTES: &[u8] = &[
+    // positions: u32 len=1, then AccountId([42; 32]), then `Option<AccountId>` Some tag 1 and
+    // the program AccountId([43; 32]).
+    const POSITIONS_BYTES: &[u8] = &[
         1, 0, 0, 0, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
-        42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+        42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 1, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43,
+        43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43,
+    ];
+    // The same one position naming no program: `Option<AccountId>` None tag 0, nothing after it.
+    const BALANCE_ONLY_POSITIONS_BYTES: &[u8] = &[
+        1, 0, 0, 0, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+        42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 0,
     ];
     // nonces: u32 len=1, then Nonce(5) as LE u128
     const NONCES_BYTES: &[u8] = &[1, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
-    fn pinned_message(instruction_data: Vec<u8>, fee: Option<FeeDeclaration>) -> Message {
+    fn pinned_message(
+        positions: Vec<Position>,
+        instruction_data: Vec<u8>,
+        fee: Option<FeeDeclaration>,
+    ) -> Message {
         Message::new_preserialized(
             AccountId::new([
                 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0,
                 1, 0, 0, 0,
             ]),
-            vec![AccountId::new([42; 32])],
+            positions,
             vec![Nonce(5)],
             instruction_data,
             fee,
         )
     }
 
-    /// Pins the borsh wire order (`program_account_id` ++ `account_ids` ++ `nonces` ++
+    fn named_position() -> Position {
+        Position::new(AccountId::new([42; 32]), AccountId::new([43; 32]))
+    }
+
+    /// Pins the borsh wire order (`program_account_id` ++ `positions` ++ `nonces` ++
     /// `instruction_data` ++ `fee`) and the prefixed hash. Any layout change trips this.
-    fn assert_hash_pinned(msg: &Message, instruction_bytes: &[u8], fee_bytes: &[u8]) {
+    fn assert_hash_pinned(
+        msg: &Message,
+        positions_bytes: &[u8],
+        instruction_bytes: &[u8],
+        fee_bytes: &[u8],
+    ) {
         let expected_borsh: Vec<u8> = [
             PROGRAM_ACCOUNT_ID_BYTES,
-            ACCOUNT_IDS_BYTES,
+            positions_bytes,
             NONCES_BYTES,
             instruction_bytes,
             fee_bytes,
@@ -183,7 +203,26 @@ mod tests {
     #[test]
     fn hash_public_pinned_exempt() {
         // instruction_data: u32 len=0; fee: `Option::None` -> a single 0 tag byte.
-        assert_hash_pinned(&pinned_message(vec![], None), &[0, 0, 0, 0], &[0]);
+        assert_hash_pinned(
+            &pinned_message(vec![named_position()], vec![], None),
+            POSITIONS_BYTES,
+            &[0, 0, 0, 0],
+            &[0],
+        );
+    }
+
+    #[test]
+    fn hash_public_pinned_balance_only_position() {
+        assert_hash_pinned(
+            &pinned_message(
+                vec![Position::balance_only(AccountId::new([42; 32]))],
+                vec![],
+                None,
+            ),
+            BALANCE_ONLY_POSITIONS_BYTES,
+            &[0, 0, 0, 0],
+            &[0],
+        );
     }
 
     #[test]
@@ -191,7 +230,8 @@ mod tests {
         // instruction_data is Vec<u8>: u32 len=3 then the raw bytes, one wire byte per element —
         // pins the element width (the pre-borsh wire carried one u32 word per element).
         assert_hash_pinned(
-            &pinned_message(vec![7, 8, 9], None),
+            &pinned_message(vec![named_position()], vec![7, 8, 9], None),
+            POSITIONS_BYTES,
             &[3, 0, 0, 0, 7, 8, 9],
             &[0],
         );
@@ -211,9 +251,11 @@ mod tests {
         ];
         assert_hash_pinned(
             &pinned_message(
+                vec![named_position()],
                 vec![],
-                Some(FeeDeclaration::new(AccountId::new([7_u8; 32]), 9, 3, 100)),
+                Some(FeeDeclaration::new(AccountId::new([7; 32]), 9, 3, 100)),
             ),
+            POSITIONS_BYTES,
             &[0, 0, 0, 0],
             fee_bytes,
         );

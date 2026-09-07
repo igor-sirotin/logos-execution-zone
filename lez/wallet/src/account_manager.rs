@@ -898,42 +898,59 @@ mod tests {
     fn private_state() -> State {
         let npk = NullifierPublicKey([0; 32]);
         let vpk = ViewingPublicKey::from_seed(&[0; 32], &[0; 32]);
-        let pre_state = AccountWithMetadata::new(Account::default(), false, (&npk, &vpk, 0));
-        State::Private(AccountPreparedData {
-            ask: None,
-            nsk: None,
-            npk,
-            identifier: 0,
-            vpk,
-            pre_state,
-            proof: None,
-            random_seed: [0; 32],
-            is_pda: false,
-        })
+        let pre_state = PreparedAccount {
+            account_id: lee::AccountId::from((&npk, &vpk, 0)),
+            account: Account::default(),
+            is_authorized: false,
+        };
+        State {
+            namespace: None,
+            kind: StateKind::Private(Box::new(AccountPreparedData {
+                ask: None,
+                nsk: None,
+                npk,
+                identifier: 0,
+                vpk,
+                pre_state,
+                proof: None,
+                random_seed: [0; 32],
+                binding: None,
+            })),
+        }
     }
 
     fn public_state() -> State {
         let npk = NullifierPublicKey([0; 32]);
         let vpk = ViewingPublicKey::from_seed(&[0; 32], &[0; 32]);
-        let account = AccountWithMetadata::new(Account::default(), false, (&npk, &vpk, 0));
-        State::Public { account, sk: None }
+        let account = PreparedAccount {
+            account_id: lee::AccountId::from((&npk, &vpk, 0)),
+            account: Account::default(),
+            is_authorized: false,
+        };
+        State {
+            namespace: None,
+            kind: StateKind::Public { account, sk: None },
+        }
     }
 
     /// A public account the wallet can sign for, holding `balance`.
     fn public_signing_state(seed: u8, balance: u128) -> State {
         let sk = lee::PrivateKey::try_new([seed; 32]).expect("valid key");
         let account_id = lee::AccountId::from(&lee::PublicKey::new_from_private_key(&sk));
-        let account = AccountWithMetadata::new(
-            Account {
+        let account = PreparedAccount {
+            account_id,
+            account: Account {
                 balance,
                 ..Account::default()
             },
-            false,
-            account_id,
-        );
-        State::Public {
-            account,
-            sk: Some(sk),
+            is_authorized: false,
+        };
+        State {
+            namespace: None,
+            kind: StateKind::Public {
+                account,
+                sk: Some(sk),
+            },
         }
     }
 
@@ -947,12 +964,13 @@ mod tests {
 
     #[test]
     fn fee_payer_is_the_first_funded_public_signing_account() {
+        let first_signing = public_signing_state(1, 1_000);
+        let expected = first_signing.account().account_id;
         let manager = manager(vec![
             private_state(),
-            public_signing_state(1, 1_000),
+            first_signing,
             public_signing_state(2, 1_000),
         ]);
-        let expected = manager.public_account_ids()[0];
         assert_eq!(manager.fee_payer_account_id(), Some(expected));
     }
 
@@ -962,10 +980,7 @@ mod tests {
         // or definition PDA passed as a non-signing input) must not be
         // designated payer — the first funded signing account is chosen instead.
         let signing = public_signing_state(3, 1_000);
-        let State::Public { account, .. } = &signing else {
-            unreachable!("public_signing_state builds a public account");
-        };
-        let signing_id = account.account_id;
+        let signing_id = signing.account().account_id;
         let manager = manager(vec![public_state(), signing]);
         assert_eq!(manager.fee_payer_account_id(), Some(signing_id));
     }
@@ -974,10 +989,7 @@ mod tests {
     fn fee_payer_skips_an_unfunded_signing_account_for_a_funded_one() {
         // An empty first signing account must not shadow a funded later one.
         let funded = public_signing_state(6, 1_000);
-        let State::Public { account, .. } = &funded else {
-            unreachable!("public_signing_state builds a public account");
-        };
-        let funded_id = account.account_id;
+        let funded_id = funded.account().account_id;
         let manager = manager(vec![public_signing_state(5, 0), funded]);
         assert_eq!(manager.fee_payer_account_id(), Some(funded_id));
     }
@@ -994,10 +1006,7 @@ mod tests {
         // payer id to fill: fall back to the first signing account rather than
         // refuse to build.
         let first = public_signing_state(7, 0);
-        let State::Public { account, .. } = &first else {
-            unreachable!("public_signing_state builds a public account");
-        };
-        let first_id = account.account_id;
+        let first_id = first.account().account_id;
         let manager = manager(vec![first, public_signing_state(8, 0)]);
         assert_eq!(manager.fee_payer_account_id(), Some(first_id));
     }
@@ -1013,16 +1022,20 @@ mod tests {
         let npk = NullifierPublicKey([7; 32]);
         let vpk = ViewingPublicKey::from_seed(&[8; 32], &[9; 32]);
         let account_id = lee::AccountId::from((&npk, &vpk, 0));
-        let pre = private_foreign_acc_preparation(account_id, npk, vpk, 0, false);
+        let pre = private_foreign_acc_preparation(account_id, npk, vpk, 0, None);
 
         assert!(pre.ask.is_none());
         assert!(!pre.pre_state.is_authorized);
 
-        let identities = manager(vec![State::Private(pre)]).account_identities();
-        let InputAccountIdentity::Private(witness) = &identities[0] else {
-            panic!("expected a private witness");
-        };
-        assert!(matches!(witness.kind, WitnessKind::Regular { ask: None }));
+        let witnesses = manager(vec![State {
+            namespace: None,
+            kind: StateKind::Private(Box::new(pre)),
+        }])
+        .private_witnesses();
+        assert!(matches!(
+            witnesses[0].kind,
+            WitnessKind::Regular { ask: None }
+        ));
     }
 
     #[test]

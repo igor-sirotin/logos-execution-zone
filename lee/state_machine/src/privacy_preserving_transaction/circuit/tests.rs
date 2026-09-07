@@ -1,10 +1,10 @@
-#![expect(clippy::shadow_unrelated, reason = "We don't care about it in tests")]
+#![allow(clippy::shadow_unrelated, reason = "We don't care about it in tests")]
 
 use lee_core::{
     Commitment, DUMMY_COMMITMENT_HASH, EncryptedAccountData, EncryptionScheme, EphemeralSecretKey,
-    Nullifier, NullifierPublicKey, NullifierWitness, PrivacyPreservingCircuitOutput,
-    PrivateWitness, SharedSecretKey, WitnessKind,
-    account::{Account, AccountId, AccountWithMetadata, Nonce, data::Data},
+    Nullifier, NullifierWitness, PrivacyPreservingCircuitOutput, PrivateWitness, SharedSecretKey,
+    WitnessKind,
+    account::{Account, AccountId, AccountView, Nonce},
     program::{PdaSeed, PrivateAccountKind},
 };
 
@@ -15,7 +15,10 @@ use crate::{
     program::Program,
     state::{
         CommitmentSet,
-        tests::{init_pda_witness, test_private_account_keys_1, test_private_account_keys_2},
+        tests::{
+            init_pda_witness, init_witness, test_private_account_keys_1,
+            test_private_account_keys_2, update_pda_witness, update_witness,
+        },
     },
 };
 
@@ -48,27 +51,24 @@ fn proof_inner_roundtrip() {
 fn prove_privacy_preserving_execution_circuit_public_and_private_pre_accounts() {
     let recipient_keys = test_private_account_keys_1();
     let program = crate::test_methods::simple_balance_transfer();
-    let sender = AccountWithMetadata::new(
-        Account {
-            program_owner: program.id().into(),
-            balance: 100,
-            ..Account::default()
-        },
-        true,
-        AccountId::new([0; 32]),
-    );
+    let sender_id = AccountId::new([0; 32]);
+    let sender_account = Account {
+        balance: 100,
+        ..Account::default()
+    };
 
     let recipient_account_id =
         AccountId::for_regular_private_account(&recipient_keys.npk(), &recipient_keys.vpk(), 0);
-    let recipient = AccountWithMetadata::new(Account::default(), true, recipient_account_id);
 
     let balance_to_move: u128 = 37;
 
-    let expected_sender_post = Account {
-        program_owner: program.id().into(),
+    let expected_sender_pre = AccountView {
+        balance: 100,
+        ..AccountView::default()
+    };
+    let expected_sender_post = AccountView {
         balance: 100 - balance_to_move,
-        nonce: Nonce::default(),
-        data: Data::default(),
+        ..AccountView::default()
     };
 
     let expected_recipient_post = Account {
@@ -77,40 +77,33 @@ fn prove_privacy_preserving_execution_circuit_public_and_private_pre_accounts() 
         ..Account::default()
     };
 
-    let expected_sender_pre = sender.clone();
-
     let init_nonce = Nonce::private_account_nonce_init(&recipient_account_id);
     let esk = EphemeralSecretKey::new(&recipient_account_id, &[0; 32], &init_nonce);
     let shared_secret = SharedSecretKey::encapsulate_deterministic(&recipient_keys.vpk(), &esk).0;
 
     let (output, proof) = execute_and_prove(
-        vec![sender, recipient],
-        Program::serialize_instruction(balance_to_move).unwrap(),
-        vec![
-            InputAccountIdentity::Public,
-            InputAccountIdentity::Private(PrivateWitness {
-                vpk: recipient_keys.vpk(),
-                random_seed: [0; 32],
-                identifier: 0,
-                kind: WitnessKind::Regular {
-                    ask: Some(recipient_keys.ask),
-                },
-                nullifier: NullifierWitness::Init {
-                    npk: recipient_keys.npk(),
-                    commitment_root: DUMMY_COMMITMENT_HASH,
-                },
-            }),
-        ],
-        &crate::test_methods::simple_balance_transfer().into(),
+        ProvingInput {
+            positions: vec![
+                Position::balance_only(sender_id),
+                Position::balance_only(recipient_account_id),
+            ],
+            signers: [sender_id].into(),
+            public_accounts: [(sender_id, sender_account)].into(),
+            private_witnesses: vec![init_witness(&recipient_keys, 0, Account::default())],
+            instruction_data: Program::serialize_instruction(balance_to_move).unwrap(),
+            ..Default::default()
+        },
+        &program.into(),
     )
     .unwrap();
 
     assert!(proof.is_valid_for(&output));
 
     let [action] = output.public_actions.try_into().unwrap();
-    let (sender_pre, sender_post) = (action.pre, action.post);
-    assert_eq!(sender_pre, expected_sender_pre);
-    assert_eq!(sender_post, expected_sender_post);
+    assert_eq!(action.account_id, sender_id);
+    assert!(action.is_authorized);
+    assert_eq!(action.pre, expected_sender_pre);
+    assert_eq!(action.post, expected_sender_post);
     assert_eq!(output.private_actions.len(), 1);
 
     let (_identifier, recipient_post) = EncryptionScheme::decrypt(
@@ -129,23 +122,17 @@ fn prove_privacy_preserving_execution_circuit_fully_private() {
     let recipient_keys = test_private_account_keys_2();
 
     let sender_nonce = Nonce(0xdead_beef);
-    let sender_pre = AccountWithMetadata::new(
-        Account {
-            balance: 100,
-            nonce: sender_nonce,
-            program_owner: program.id().into(),
-            data: Data::default(),
-        },
-        true,
-        AccountId::for_regular_private_account(&sender_keys.npk(), &sender_keys.vpk(), 0),
-    );
     let sender_account_id =
         AccountId::for_regular_private_account(&sender_keys.npk(), &sender_keys.vpk(), 0);
-    let commitment_sender = Commitment::new(&sender_account_id, &sender_pre.account);
+    let sender_pre_account = Account {
+        balance: 100,
+        nonce: sender_nonce,
+        ..Account::default()
+    };
+    let commitment_sender = Commitment::new(&sender_account_id, &sender_pre_account);
 
     let recipient_account_id =
         AccountId::for_regular_private_account(&recipient_keys.npk(), &recipient_keys.vpk(), 0);
-    let recipient = AccountWithMetadata::new(Account::default(), true, recipient_account_id);
     let balance_to_move: u128 = 37;
 
     let mut commitment_set = CommitmentSet::with_capacity(2);
@@ -161,10 +148,7 @@ fn prove_privacy_preserving_execution_circuit_fully_private() {
         ),
     ];
 
-    let program = crate::test_methods::simple_balance_transfer();
-
     let expected_private_account_1 = Account {
-        program_owner: program.id().into(),
         balance: 100 - balance_to_move,
         nonce: sender_nonce.private_account_nonce_increment(&sender_keys.nsk()),
         ..Default::default()
@@ -192,37 +176,25 @@ fn prove_privacy_preserving_execution_circuit_fully_private() {
         SharedSecretKey::encapsulate_deterministic(&recipient_keys.vpk(), &esk_2).0;
 
     let (output, proof) = execute_and_prove(
-        vec![sender_pre, recipient],
-        Program::serialize_instruction(balance_to_move).unwrap(),
-        vec![
-            InputAccountIdentity::Private(PrivateWitness {
-                vpk: sender_keys.vpk(),
-                random_seed: [0; 32],
-                identifier: 0,
-                kind: WitnessKind::Regular {
-                    ask: Some(sender_keys.ask),
-                },
-                nullifier: NullifierWitness::Update {
-                    view_tag: 0,
-                    nsk: sender_keys.nsk(),
-                    membership_proof: commitment_set
+        ProvingInput {
+            positions: vec![
+                Position::balance_only(sender_account_id),
+                Position::balance_only(recipient_account_id),
+            ],
+            private_witnesses: vec![
+                update_witness(
+                    &sender_keys,
+                    0,
+                    sender_pre_account,
+                    commitment_set
                         .get_proof_for(&commitment_sender)
                         .expect("sender's commitment must be in the set"),
-                },
-            }),
-            InputAccountIdentity::Private(PrivateWitness {
-                vpk: recipient_keys.vpk(),
-                random_seed: [0; 32],
-                identifier: 0,
-                kind: WitnessKind::Regular {
-                    ask: Some(recipient_keys.ask),
-                },
-                nullifier: NullifierWitness::Init {
-                    npk: recipient_keys.npk(),
-                    commitment_root: DUMMY_COMMITMENT_HASH,
-                },
-            }),
-        ],
+                ),
+                init_witness(&recipient_keys, 0, Account::default()),
+            ],
+            instruction_data: Program::serialize_instruction(balance_to_move).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     )
     .unwrap();
@@ -279,23 +251,14 @@ fn init_note_view_tag_is_derived_from_account_keys() {
     let keys = test_private_account_keys_1();
     let identifier: u128 = 0;
     let account_id = AccountId::for_regular_private_account(&keys.npk(), &keys.vpk(), identifier);
-    let account = AccountWithMetadata::new(Account::default(), true, account_id);
 
     let (output, proof) = execute_and_prove(
-        vec![account],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier,
-            kind: WitnessKind::Regular {
-                ask: Some(keys.ask),
-            },
-            nullifier: NullifierWitness::Init {
-                npk: keys.npk(),
-                commitment_root: DUMMY_COMMITMENT_HASH,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![init_witness(&keys, identifier, Account::default())],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     )
     .unwrap();
@@ -315,35 +278,37 @@ fn update_note_view_tag_is_the_supplied_value() {
     let identifier: u128 = 99;
     let account_id = AccountId::for_regular_private_account(&keys.npk(), &keys.vpk(), identifier);
     let account = Account {
-        program_owner: program.id().into(),
         balance: 1,
         ..Account::default()
     };
     let commitment = Commitment::new(&account_id, &account);
     let mut commitment_set = CommitmentSet::with_capacity(1);
     commitment_set.extend(std::slice::from_ref(&commitment));
-    let sender = AccountWithMetadata::new(account, true, account_id);
 
     // A tag deliberately different from the address-derived one, so a passthrough is
     // distinguishable from re-derivation.
     let fed_tag = EncryptedAccountData::compute_view_tag(&keys.npk(), &keys.vpk()).wrapping_add(1);
 
     let (output, proof) = execute_and_prove(
-        vec![sender],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier,
-            kind: WitnessKind::Regular {
-                ask: Some(keys.ask),
-            },
-            nullifier: NullifierWitness::Update {
-                view_tag: fed_tag,
-                nsk: keys.nsk(),
-                membership_proof: commitment_set.get_proof_for(&commitment).unwrap(),
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![PrivateWitness {
+                account,
+                vpk: keys.vpk(),
+                random_seed: [0; 32],
+                identifier,
+                kind: WitnessKind::Regular {
+                    ask: Some(keys.ask),
+                },
+                nullifier: NullifierWitness::Update {
+                    view_tag: fed_tag,
+                    nsk: keys.nsk(),
+                    membership_proof: commitment_set.get_proof_for(&commitment).unwrap(),
+                },
+            }],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     )
     .unwrap();
@@ -359,11 +324,8 @@ fn update_note_view_tag_is_the_supplied_value() {
 #[test]
 fn circuit_fails_when_chained_validity_windows_have_empty_intersection() {
     let account_keys = test_private_account_keys_1();
-    let pre = AccountWithMetadata::new(
-        Account::default(),
-        true,
-        AccountId::for_regular_private_account(&account_keys.npk(), &account_keys.vpk(), 0),
-    );
+    let account_id =
+        AccountId::for_regular_private_account(&account_keys.npk(), &account_keys.vpk(), 0);
 
     let validity_window_chain_caller = crate::test_methods::validity_window_chain_caller();
     let validity_window = crate::test_methods::validity_window();
@@ -384,20 +346,12 @@ fn circuit_fails_when_chained_validity_windows_have_empty_intersection() {
     );
 
     let result = execute_and_prove(
-        vec![pre],
-        instruction,
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: account_keys.vpk(),
-            random_seed: [0; 32],
-            identifier: 0,
-            kind: WitnessKind::Regular {
-                ask: Some(account_keys.ask),
-            },
-            nullifier: NullifierWitness::Init {
-                npk: account_keys.npk(),
-                commitment_root: DUMMY_COMMITMENT_HASH,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![init_witness(&account_keys, 0, Account::default())],
+            instruction_data: instruction,
+            ..Default::default()
+        },
         &program_with_deps,
     );
 
@@ -424,23 +378,18 @@ fn private_pda_with_custom_identifier_encrypts_correct_kind() {
     let esk = EphemeralSecretKey::new(&account_id, &[0; 32], &init_nonce);
     let shared_secret = SharedSecretKey::encapsulate_deterministic(&keys.vpk(), &esk).0;
 
-    let pre_state = AccountWithMetadata::new(Account::default(), false, account_id);
-
     let (output, _proof) = execute_and_prove(
-        vec![pre_state],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier,
-            kind: WitnessKind::Pda {
-                binding: Some((program.id().into(), seed)),
-            },
-            nullifier: NullifierWitness::Init {
-                npk,
-                commitment_root: DUMMY_COMMITMENT_HASH,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![init_pda_witness(
+                &keys,
+                identifier,
+                (program.id().into(), seed),
+                Account::default(),
+            )],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.clone().into(),
     )
     .unwrap();
@@ -468,7 +417,6 @@ fn private_pda_init() {
     // PDA (new, private PDA)
     let pda_id =
         AccountId::for_private_pda(&AccountId::from(program.id()), &seed, &npk, &keys.vpk(), 0);
-    let pda_pre = AccountWithMetadata::new(Account::default(), false, pda_id);
 
     let auth_id: AccountId = simple_transfer.id().into();
     let program_with_deps = ProgramWithDependencies::new(
@@ -481,9 +429,17 @@ fn private_pda_init() {
     let instruction = Program::serialize_instruction((seed, auth_id, 0_u128, false)).unwrap();
 
     let result = execute_and_prove(
-        vec![pda_pre],
-        instruction,
-        vec![init_pda_witness(&keys, 0, None)],
+        ProvingInput {
+            positions: vec![Position::balance_only(pda_id)],
+            private_witnesses: vec![init_pda_witness(
+                &keys,
+                0,
+                (program.id().into(), seed),
+                Account::default(),
+            )],
+            instruction_data: instruction,
+            ..Default::default()
+        },
         &program_with_deps,
     );
 
@@ -504,19 +460,13 @@ fn private_pda_withdraw() {
     // PDA (new, private PDA)
     let pda_id =
         AccountId::for_private_pda(&AccountId::from(program.id()), &seed, &npk, &keys.vpk(), 0);
-    let pda_pre = AccountWithMetadata::new(Account::default(), false, pda_id);
 
     // Recipient (public)
     let recipient_id = AccountId::new([88; 32]);
-    let recipient_pre = AccountWithMetadata::new(
-        Account {
-            program_owner: simple_transfer.id().into(),
-            balance: 10000,
-            ..Account::default()
-        },
-        true,
-        recipient_id,
-    );
+    let recipient_account = Account {
+        balance: 10000,
+        ..Account::default()
+    };
 
     let auth_id: AccountId = simple_transfer.id().into();
     let program_with_deps = ProgramWithDependencies::new(
@@ -529,12 +479,22 @@ fn private_pda_withdraw() {
     let instruction = Program::serialize_instruction((seed, auth_id, 0_u128, true)).unwrap();
 
     let result = execute_and_prove(
-        vec![pda_pre, recipient_pre],
-        instruction,
-        vec![
-            init_pda_witness(&keys, 0, None),
-            InputAccountIdentity::Public,
-        ],
+        ProvingInput {
+            positions: vec![
+                Position::balance_only(pda_id),
+                Position::balance_only(recipient_id),
+            ],
+            signers: [recipient_id].into(),
+            public_accounts: [(recipient_id, recipient_account)].into(),
+            private_witnesses: vec![init_pda_witness(
+                &keys,
+                0,
+                (program.id().into(), seed),
+                Account::default(),
+            )],
+            instruction_data: instruction,
+            ..Default::default()
+        },
         &program_with_deps,
     );
 
@@ -556,41 +516,33 @@ fn shared_account_receives_via_simple_transfer() {
 
     // Sender: public account with balance, owned by auth-transfer
     let sender_id = AccountId::new([99; 32]);
-    let sender = AccountWithMetadata::new(
-        Account {
-            program_owner: program.id().into(),
-            balance: 1000,
-            ..Account::default()
-        },
-        true,
-        sender_id,
-    );
+    let sender_account = Account {
+        balance: 1000,
+        ..Account::default()
+    };
 
     // Recipient: shared private account (new, foreign)
     let shared_account_id = AccountId::from((&shared_npk, &shared_keys.vpk(), shared_identifier));
-    let recipient = AccountWithMetadata::new(Account::default(), true, shared_account_id);
 
     let balance_to_move: u128 = 100;
     let instruction = Program::serialize_instruction(balance_to_move).unwrap();
 
     let result = execute_and_prove(
-        vec![sender, recipient],
-        instruction,
-        vec![
-            InputAccountIdentity::Public,
-            InputAccountIdentity::Private(PrivateWitness {
-                vpk: shared_keys.vpk(),
-                random_seed: [0; 32],
-                identifier: shared_identifier,
-                kind: WitnessKind::Regular {
-                    ask: Some(shared_keys.ask),
-                },
-                nullifier: NullifierWitness::Init {
-                    npk: shared_npk,
-                    commitment_root: DUMMY_COMMITMENT_HASH,
-                },
-            }),
-        ],
+        ProvingInput {
+            positions: vec![
+                Position::balance_only(sender_id),
+                Position::balance_only(shared_account_id),
+            ],
+            signers: [sender_id].into(),
+            public_accounts: [(sender_id, sender_account)].into(),
+            private_witnesses: vec![init_witness(
+                &shared_keys,
+                shared_identifier,
+                Account::default(),
+            )],
+            instruction_data: instruction,
+            ..Default::default()
+        },
         &program.into(),
     );
 
@@ -614,23 +566,14 @@ fn private_authorized_init_encrypts_regular_kind_with_identifier() {
         &Nonce::private_account_nonce_init(&account_id),
     );
     let ssk = SharedSecretKey::encapsulate_deterministic(&keys.vpk(), &esk).0;
-    let pre = AccountWithMetadata::new(Account::default(), true, account_id);
 
     let (output, _) = execute_and_prove(
-        vec![pre],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier,
-            kind: WitnessKind::Regular {
-                ask: Some(keys.ask),
-            },
-            nullifier: NullifierWitness::Init {
-                npk: NullifierPublicKey::from(&keys.nsk()),
-                commitment_root: DUMMY_COMMITMENT_HASH,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![init_witness(&keys, identifier, Account::default())],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     )
     .unwrap();
@@ -656,23 +599,14 @@ fn private_foreign_init_encrypts_regular_kind_with_identifier() {
         &Nonce::private_account_nonce_init(&recipient_id),
     );
     let ssk = SharedSecretKey::encapsulate_deterministic(&keys.vpk(), &esk).0;
-    let recipient = AccountWithMetadata::new(Account::default(), true, recipient_id);
 
     let (output, _) = execute_and_prove(
-        vec![recipient],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier,
-            kind: WitnessKind::Regular {
-                ask: Some(keys.ask),
-            },
-            nullifier: NullifierWitness::Init {
-                npk: keys.npk(),
-                commitment_root: DUMMY_COMMITMENT_HASH,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(recipient_id)],
+            private_witnesses: vec![init_witness(&keys, identifier, Account::default())],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     )
     .unwrap();
@@ -698,7 +632,6 @@ fn private_authorized_update_encrypts_regular_kind_with_identifier() {
     );
     let ssk = SharedSecretKey::encapsulate_deterministic(&keys.vpk(), &esk).0;
     let account = Account {
-        program_owner: program.id().into(),
         balance: 1,
         ..Account::default()
     };
@@ -706,24 +639,18 @@ fn private_authorized_update_encrypts_regular_kind_with_identifier() {
     let mut commitment_set = CommitmentSet::with_capacity(1);
     commitment_set.extend(std::slice::from_ref(&commitment));
 
-    let sender = AccountWithMetadata::new(account, true, account_id);
-
     let (output, _) = execute_and_prove(
-        vec![sender],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier,
-            kind: WitnessKind::Regular {
-                ask: Some(keys.ask),
-            },
-            nullifier: NullifierWitness::Update {
-                view_tag: 0,
-                nsk: keys.nsk(),
-                membership_proof: commitment_set.get_proof_for(&commitment).unwrap(),
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![update_witness(
+                &keys,
+                identifier,
+                account,
+                commitment_set.get_proof_for(&commitment).unwrap(),
+            )],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     )
     .unwrap();
@@ -734,16 +661,14 @@ fn private_authorized_update_encrypts_regular_kind_with_identifier() {
     );
 }
 
-/// Builds an on-chain regular private account owned by `program`, returning its id, pre-state
-/// and a membership proof for its commitment.
+/// Builds a regular private account, returning its id, pre-state and a membership proof for its
+/// commitment.
 fn seeded_regular_account(
     keys: &crate::state::tests::TestPrivateKeys,
-    program: &Program,
     identifier: u128,
-) -> (AccountId, AccountWithMetadata, lee_core::MembershipProof) {
+) -> (AccountId, Account, lee_core::MembershipProof) {
     let account_id = AccountId::for_regular_private_account(&keys.npk(), &keys.vpk(), identifier);
     let account = Account {
-        program_owner: program.id().into(),
         balance: 1,
         ..Account::default()
     };
@@ -751,11 +676,7 @@ fn seeded_regular_account(
     let mut commitment_set = CommitmentSet::with_capacity(1);
     commitment_set.extend(std::slice::from_ref(&commitment));
     let proof = commitment_set.get_proof_for(&commitment).unwrap();
-    (
-        account_id,
-        AccountWithMetadata::new(account, false, account_id),
-        proof,
-    )
+    (account_id, account, proof)
 }
 
 /// Spending without consenting. The witness carries no `ask`, so the pre-state is unauthorized,
@@ -764,50 +685,59 @@ fn seeded_regular_account(
 fn private_regular_update_without_ask_is_spendable() {
     let program = crate::test_methods::noop();
     let keys = test_private_account_keys_1();
-    let (_, pre, membership_proof) = seeded_regular_account(&keys, &program, 0);
-    assert!(!pre.is_authorized);
+    let (account_id, account, membership_proof) = seeded_regular_account(&keys, 0);
 
     execute_and_prove(
-        vec![pre],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier: 0,
-            kind: WitnessKind::Regular { ask: None },
-            nullifier: NullifierWitness::Update {
-                view_tag: 0,
-                nsk: keys.nsk(),
-                membership_proof,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![PrivateWitness {
+                account,
+                vpk: keys.vpk(),
+                random_seed: [0; 32],
+                identifier: 0,
+                kind: WitnessKind::Regular { ask: None },
+                nullifier: NullifierWitness::Update {
+                    view_tag: 0,
+                    nsk: keys.nsk(),
+                    membership_proof,
+                },
+            }],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     )
     .unwrap();
 }
 
-/// Claiming authorization without supplying an `ask` is rejected.
+/// Claiming authorization without supplying an `ask` is rejected. The account's id is put in
+/// `signers` to force the top-level claim to `true` despite the witness carrying no credential —
+/// the circuit's own `pre.is_authorized == ask.is_some()` check then rejects the mismatch.
 #[test]
 fn private_regular_witness_without_ask_cannot_assert_authorization() {
     let program = crate::test_methods::noop();
     let keys = test_private_account_keys_1();
-    let (account_id, pre, membership_proof) = seeded_regular_account(&keys, &program, 0);
-    let pre = AccountWithMetadata::new(pre.account, true, account_id);
+    let (account_id, account, membership_proof) = seeded_regular_account(&keys, 0);
 
     let result = execute_and_prove(
-        vec![pre],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier: 0,
-            kind: WitnessKind::Regular { ask: None },
-            nullifier: NullifierWitness::Update {
-                view_tag: 0,
-                nsk: keys.nsk(),
-                membership_proof,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            signers: [account_id].into(),
+            private_witnesses: vec![PrivateWitness {
+                account,
+                vpk: keys.vpk(),
+                random_seed: [0; 32],
+                identifier: 0,
+                kind: WitnessKind::Regular { ask: None },
+                nullifier: NullifierWitness::Update {
+                    view_tag: 0,
+                    nsk: keys.nsk(),
+                    membership_proof,
+                },
+            }],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     );
 
@@ -820,25 +750,28 @@ fn regular_update_with_wrong_ask_nsk_is_rejected() {
     let program = crate::test_methods::noop();
     let keys = test_private_account_keys_1();
     let foreign = test_private_account_keys_2();
-    let (account_id, pre, membership_proof) = seeded_regular_account(&keys, &program, 0);
-    let pre = AccountWithMetadata::new(pre.account, true, account_id);
+    let (account_id, account, membership_proof) = seeded_regular_account(&keys, 0);
 
     let result = execute_and_prove(
-        vec![pre],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier: 0,
-            kind: WitnessKind::Regular {
-                ask: Some(foreign.ask),
-            },
-            nullifier: NullifierWitness::Update {
-                view_tag: 0,
-                nsk: keys.nsk(),
-                membership_proof,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![PrivateWitness {
+                account,
+                vpk: keys.vpk(),
+                random_seed: [0; 32],
+                identifier: 0,
+                kind: WitnessKind::Regular {
+                    ask: Some(foreign.ask),
+                },
+                nullifier: NullifierWitness::Update {
+                    view_tag: 0,
+                    nsk: keys.nsk(),
+                    membership_proof,
+                },
+            }],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     );
 
@@ -852,23 +785,26 @@ fn regular_init_with_non_chaining_ask_npk_is_rejected() {
     let keys = test_private_account_keys_1();
     let foreign = test_private_account_keys_2();
     let account_id = AccountId::for_regular_private_account(&keys.npk(), &keys.vpk(), 0);
-    let pre = AccountWithMetadata::new(Account::default(), true, account_id);
 
     let result = execute_and_prove(
-        vec![pre],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier: 0,
-            kind: WitnessKind::Regular {
-                ask: Some(foreign.ask),
-            },
-            nullifier: NullifierWitness::Init {
-                npk: keys.npk(),
-                commitment_root: DUMMY_COMMITMENT_HASH,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![PrivateWitness {
+                account: Account::default(),
+                vpk: keys.vpk(),
+                random_seed: [0; 32],
+                identifier: 0,
+                kind: WitnessKind::Regular {
+                    ask: Some(foreign.ask),
+                },
+                nullifier: NullifierWitness::Init {
+                    npk: keys.npk(),
+                    commitment_root: DUMMY_COMMITMENT_HASH,
+                },
+            }],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     );
 
@@ -881,22 +817,26 @@ fn regular_init_with_non_chaining_ask_npk_is_rejected() {
 fn auth_asserting_program_rejects_unauthorized_regular_private_account() {
     let program = crate::test_methods::auth_asserting_noop();
     let keys = test_private_account_keys_1();
-    let (_, pre, membership_proof) = seeded_regular_account(&keys, &program, 0);
+    let (account_id, account, membership_proof) = seeded_regular_account(&keys, 0);
 
     let result = execute_and_prove(
-        vec![pre],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier: 0,
-            kind: WitnessKind::Regular { ask: None },
-            nullifier: NullifierWitness::Update {
-                view_tag: 0,
-                nsk: keys.nsk(),
-                membership_proof,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![PrivateWitness {
+                account,
+                vpk: keys.vpk(),
+                random_seed: [0; 32],
+                identifier: 0,
+                kind: WitnessKind::Regular { ask: None },
+                nullifier: NullifierWitness::Update {
+                    view_tag: 0,
+                    nsk: keys.nsk(),
+                    membership_proof,
+                },
+            }],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     );
 
@@ -915,15 +855,15 @@ fn pda_update_attempt(
     let keys = test_private_account_keys_1();
     let seed = PdaSeed::new([42; 32]);
     let simple_transfer_id: AccountId = simple_transfer.id().into();
+    let program_id: AccountId = program.id().into();
     let pda_id = AccountId::for_private_pda(
-        &AccountId::from(program.id()),
+        &program_id,
         &seed,
         &keys.npk(),
         &keys.vpk(),
         derivation_identifier,
     );
     let pda_account = Account {
-        program_owner: simple_transfer_id,
         balance: 1,
         ..Account::default()
     };
@@ -931,32 +871,46 @@ fn pda_update_attempt(
     let mut commitment_set = CommitmentSet::with_capacity(1);
     commitment_set.extend(std::slice::from_ref(&pda_commitment));
 
-    let pda_pre = AccountWithMetadata::new(pda_account, declare_authorized, pda_id);
-    let recipient_pre = AccountWithMetadata::new(Account::default(), true, AccountId::new([0; 32]));
+    let recipient_id = AccountId::new([0; 32]);
+    let mut signers = HashSet::from([recipient_id]);
+    if declare_authorized {
+        signers.insert(pda_id);
+    }
 
     let program_with_deps = ProgramWithDependencies::new(
-        program.clone(),
-        program.id().into(),
+        program,
+        program_id,
         [(simple_transfer_id, simple_transfer)].into(),
     );
 
     execute_and_prove(
-        vec![pda_pre, recipient_pre],
-        Program::serialize_instruction((seed, 1_u128, simple_transfer_id)).unwrap(),
-        vec![
-            InputAccountIdentity::Private(PrivateWitness {
-                vpk: keys.vpk(),
-                random_seed: [0; 32],
-                identifier: witness_identifier,
-                kind: WitnessKind::Pda { binding: None },
-                nullifier: NullifierWitness::Update {
-                    view_tag: 0,
-                    nsk: keys.nsk(),
-                    membership_proof: commitment_set.get_proof_for(&pda_commitment).unwrap(),
-                },
-            }),
-            InputAccountIdentity::Public,
-        ],
+        ProvingInput {
+            positions: vec![
+                Position::balance_only(pda_id),
+                Position::balance_only(recipient_id),
+            ],
+            signers,
+            // Also reachable as a plain public account: when `witness_identifier` doesn't
+            // derive `pda_id` (the identifier-mismatch tests), the witness goes unmatched and
+            // this is the fallback the host materializes. Without it the host's own balance
+            // bookkeeping underflows while mirroring the chained call, failing before the proof
+            // is even attempted, which would surface as the wrong `LeeError` variant.
+            public_accounts: [
+                (pda_id, pda_account.clone()),
+                (recipient_id, Account::default()),
+            ]
+            .into(),
+            private_witnesses: vec![update_pda_witness(
+                &keys,
+                witness_identifier,
+                (program_id, seed),
+                pda_account,
+                commitment_set.get_proof_for(&pda_commitment).unwrap(),
+            )],
+            instruction_data: Program::serialize_instruction((seed, 1_u128, simple_transfer_id))
+                .unwrap(),
+            ..Default::default()
+        },
         &program_with_deps,
     )
     .map(|(output, _proof)| output)
@@ -1007,16 +961,19 @@ fn private_pda_init_identifier_mismatch_fails() {
     let seed = PdaSeed::new([42; 32]);
     let account_id =
         AccountId::for_private_pda(&AccountId::from(program.id()), &seed, &npk, &keys.vpk(), 5);
-    let pre_state = AccountWithMetadata::new(Account::default(), false, account_id);
 
     let result = execute_and_prove(
-        vec![pre_state],
-        Program::serialize_instruction(()).unwrap(),
-        vec![init_pda_witness(
-            &keys,
-            99,
-            Some((program.id().into(), seed)),
-        )],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            private_witnesses: vec![init_pda_witness(
+                &keys,
+                99,
+                (program.id().into(), seed),
+                Account::default(),
+            )],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     );
 
@@ -1037,23 +994,20 @@ fn private_pda_init_at_root_call_may_not_declare_authorization() {
         &keys.vpk(),
         identifier,
     );
-    let pre_state = AccountWithMetadata::new(Account::default(), true, account_id);
 
     let result = execute_and_prove(
-        vec![pre_state],
-        Program::serialize_instruction(()).unwrap(),
-        vec![InputAccountIdentity::Private(PrivateWitness {
-            vpk: keys.vpk(),
-            random_seed: [0; 32],
-            identifier,
-            kind: WitnessKind::Pda {
-                binding: Some((program.id().into(), seed)),
-            },
-            nullifier: NullifierWitness::Init {
-                npk,
-                commitment_root: DUMMY_COMMITMENT_HASH,
-            },
-        })],
+        ProvingInput {
+            positions: vec![Position::balance_only(account_id)],
+            signers: [account_id].into(),
+            private_witnesses: vec![init_pda_witness(
+                &keys,
+                identifier,
+                (program.id().into(), seed),
+                Account::default(),
+            )],
+            instruction_data: Program::serialize_instruction(()).unwrap(),
+            ..Default::default()
+        },
         &program.into(),
     );
 
@@ -1065,4 +1019,401 @@ fn private_pda_update_identifier_mismatch_fails() {
     let result = pda_update_attempt(false, 5, 99);
 
     assert!(matches!(result, Err(LeeError::CircuitProvingError(_))));
+}
+
+// `namespace_forwarder` at its own address, chaining into `data_changer` at its own address.
+// The forwarder reads `(account, forwarder)`; the callee opens `(account, callee)`, which a
+// top-level mention of the forwarder's namespace never carries.
+fn forwarder_over_callee() -> (ProgramWithDependencies, AccountId, AccountId) {
+    let forwarder = crate::test_methods::namespace_forwarder();
+    let callee = crate::test_methods::data_changer();
+    let forwarder_id: AccountId = forwarder.id().into();
+    let callee_id: AccountId = callee.id().into();
+
+    (
+        ProgramWithDependencies::new(forwarder, forwarder_id, [(callee_id, callee)].into()),
+        forwarder_id,
+        callee_id,
+    )
+}
+
+// `namespace_forwarder`'s instruction: an optional write at an account of the caller's choosing
+// under the forwarder's own namespace, then one chained call per `(callee, position, instruction)`
+// triple.
+fn forwarder_instruction(
+    own_write: Option<(AccountId, &[u8])>,
+    calls: &[(AccountId, Position, Vec<u8>)],
+) -> Vec<u8> {
+    Program::serialize_instruction((
+        own_write.map(|(target, bytes)| (target, bytes.to_vec())),
+        calls.to_vec(),
+    ))
+    .unwrap()
+}
+
+// The shape the earlier tests use: no write of its own, every call aimed at the callee's own
+// namespace on the account the transaction named.
+fn calls_at(
+    account_id: AccountId,
+    calls: &[(AccountId, Vec<u8>)],
+) -> Vec<(AccountId, Position, Vec<u8>)> {
+    calls
+        .iter()
+        .map(|(callee, instruction)| {
+            (
+                *callee,
+                Position::new(account_id, *callee),
+                instruction.clone(),
+            )
+        })
+        .collect()
+}
+
+// `data_changer`'s instruction is the bytes to write; each callee is encoded for the program that
+// will actually run it, which is not always the same program.
+fn data_changer_instruction(write: &[u8]) -> Vec<u8> {
+    Program::serialize_instruction(write.to_vec()).unwrap()
+}
+
+fn forward_to(account_id: AccountId, callee_id: AccountId, write: &[u8]) -> Vec<u8> {
+    forwarder_instruction(
+        None,
+        &calls_at(account_id, &[(callee_id, data_changer_instruction(write))]),
+    )
+}
+
+fn input_with(
+    account_id: AccountId,
+    forwarder_id: AccountId,
+    account: Account,
+    instruction_data: Vec<u8>,
+) -> ProvingInput {
+    ProvingInput {
+        positions: vec![Position::new(account_id, forwarder_id)],
+        public_accounts: [(account_id, account)].into(),
+        instruction_data,
+        ..Default::default()
+    }
+}
+
+fn forwarding_input(
+    account_id: AccountId,
+    forwarder_id: AccountId,
+    callee_id: AccountId,
+    account: Account,
+    write: &[u8],
+) -> ProvingInput {
+    input_with(
+        account_id,
+        forwarder_id,
+        account,
+        forward_to(account_id, callee_id, write),
+    )
+}
+
+#[test]
+fn resolver_supplies_a_chained_calls_unfetched_shard() {
+    let (program, forwarder_id, callee_id) = forwarder_over_callee();
+    let account_id = AccountId::new([7; 32]);
+    let balance = 500;
+    // What the chain holds at `(account, callee)`. A wallet that fetched only the namespace its
+    // mention named does not have it, so the traversal has to ask for it.
+    let on_chain = Data::try_from(vec![1; 8]).unwrap();
+    let own_namespace = Data::try_from(vec![2; 8]).unwrap();
+    let write = vec![3; 16];
+
+    let sparse = Account {
+        balance,
+        ..Account::default()
+    }
+    .with_shard(forwarder_id, own_namespace.clone());
+
+    let mut asked: Vec<Position> = Vec::new();
+    let (output, proof) = execute_and_prove_with(
+        forwarding_input(account_id, forwarder_id, callee_id, sparse, &write),
+        &program,
+        &mut |position| {
+            asked.push(position);
+            Ok(Some(on_chain.clone()))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(asked, vec![Position::new(account_id, callee_id)]);
+    assert!(proof.is_valid_for(&output));
+
+    let [action] = <[_; 1]>::try_from(output.public_actions).unwrap();
+    assert_eq!(action.account_id, account_id);
+    // The merge is one `set_shard`: the balance and the namespace the input did carry are
+    // exactly what was handed in, and the journal's pre-state names the resolved shard rather
+    // than the empty one a sparse account would otherwise have produced.
+    assert_eq!(action.pre.balance, balance);
+    assert_eq!(action.pre.shards[&forwarder_id], own_namespace);
+    assert_eq!(action.pre.shards[&callee_id], on_chain);
+    assert_eq!(action.post.balance, balance);
+    assert_eq!(
+        action.post.shards[&callee_id],
+        Data::try_from(write).unwrap()
+    );
+}
+
+#[test]
+fn a_resolved_sparse_account_matches_the_complete_one() {
+    let (program, forwarder_id, callee_id) = forwarder_over_callee();
+    let account_id = AccountId::new([7; 32]);
+    let on_chain = Data::try_from(vec![1; 8]).unwrap();
+    let write = vec![3; 16];
+
+    let sparse = Account {
+        balance: 500,
+        ..Account::default()
+    }
+    .with_shard(forwarder_id, Data::try_from(vec![2; 8]).unwrap());
+    let complete = sparse.clone().with_shard(callee_id, on_chain.clone());
+
+    // The wrapper on the whole account: no resolution happens, which is what every caller that
+    // supplies complete accounts does today.
+    let (complete_output, _) = execute_and_prove(
+        forwarding_input(account_id, forwarder_id, callee_id, complete, &write),
+        &program,
+    )
+    .unwrap();
+
+    let (resolved_output, _) = execute_and_prove_with(
+        forwarding_input(account_id, forwarder_id, callee_id, sparse.clone(), &write),
+        &program,
+        &mut |_| Ok(Some(on_chain.clone())),
+    )
+    .unwrap();
+
+    assert_eq!(resolved_output, complete_output);
+
+    // The same sparse account with no resolver journals an empty pre where the chain holds a
+    // record — the mismatch a verifier rejects, and the reason the assertion above is not
+    // satisfied by doing nothing.
+    let (unresolved_output, _) = execute_and_prove(
+        forwarding_input(account_id, forwarder_id, callee_id, sparse, &write),
+        &program,
+    )
+    .unwrap();
+
+    assert_ne!(unresolved_output, complete_output);
+}
+
+#[test]
+fn resolving_an_empty_shard_matches_not_resolving_at_all() {
+    let (program, forwarder_id, callee_id) = forwarder_over_callee();
+    let account_id = AccountId::new([7; 32]);
+    let write = vec![3; 16];
+
+    let sparse = Account {
+        balance: 500,
+        ..Account::default()
+    }
+    .with_shard(forwarder_id, Data::try_from(vec![2; 8]).unwrap());
+
+    let (unresolved_output, _) = execute_and_prove(
+        forwarding_input(account_id, forwarder_id, callee_id, sparse.clone(), &write),
+        &program,
+    )
+    .unwrap();
+
+    // A namespace the chain does not hold comes back empty. It is indistinguishable from never
+    // having asked, which is why the wallet may record the position as covered on an empty
+    // answer and never ask again.
+    let mut asked = 0_u32;
+    let (resolved_output, _) = execute_and_prove_with(
+        forwarding_input(account_id, forwarder_id, callee_id, sparse, &write),
+        &program,
+        &mut |_| {
+            asked += 1;
+            Ok(Some(Data::empty()))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(asked, 1);
+    assert_eq!(resolved_output, unresolved_output);
+}
+
+#[test]
+fn a_resolver_error_aborts_the_traversal() {
+    let (program, forwarder_id, callee_id) = forwarder_over_callee();
+    let account_id = AccountId::new([7; 32]);
+
+    let result = execute_and_prove_with(
+        forwarding_input(
+            account_id,
+            forwarder_id,
+            callee_id,
+            Account::default(),
+            &[3; 16],
+        ),
+        &program,
+        &mut |_| {
+            Err(LeeError::AccountResolution(
+                "sequencer unreachable".to_owned(),
+            ))
+        },
+    );
+
+    assert!(matches!(result, Err(LeeError::AccountResolution(_))));
+}
+
+// The forwarder chained to itself at its own address, so a call can revisit the very position the
+// transaction named top-level. The inner call gets an empty call list and therefore reports that
+// position unchanged, which makes the value it ran against observable in the journal.
+fn forwarder_over_itself() -> (ProgramWithDependencies, AccountId) {
+    let forwarder = crate::test_methods::namespace_forwarder();
+    let forwarder_id: AccountId = forwarder.id().into();
+
+    (
+        ProgramWithDependencies::new(
+            forwarder.clone(),
+            forwarder_id,
+            [(forwarder_id, forwarder)].into(),
+        ),
+        forwarder_id,
+    )
+}
+
+#[test]
+fn a_top_level_position_is_never_resolved_for() {
+    let (program, forwarder_id) = forwarder_over_itself();
+    let account_id = AccountId::new([7; 32]);
+    let supplied = Data::try_from(vec![0xA1; 12]).unwrap();
+
+    // A chained call lands back on the position the transaction named top-level. The caller
+    // already supplied that position's value, so nothing may fetch another one over it — and it
+    // is the traversal, not the caller, that has to know so.
+    let instruction = forwarder_instruction(
+        None,
+        &calls_at(
+            account_id,
+            &[(forwarder_id, forwarder_instruction(None, &[]))],
+        ),
+    );
+
+    let mut asked: Vec<Position> = Vec::new();
+    let (output, proof) = execute_and_prove_with(
+        input_with(
+            account_id,
+            forwarder_id,
+            Account::default().with_shard(forwarder_id, supplied.clone()),
+            instruction,
+        ),
+        &program,
+        &mut |position| {
+            asked.push(position);
+            Ok(Some(Data::try_from(vec![0xEE; 12]).unwrap()))
+        },
+    )
+    .unwrap();
+
+    assert!(
+        asked.is_empty(),
+        "the only position this transaction touches came from the caller: {asked:?}"
+    );
+    assert!(proof.is_valid_for(&output));
+
+    let [action] = <[_; 1]>::try_from(output.public_actions).unwrap();
+    assert_eq!(
+        action.post.shards[&forwarder_id], supplied,
+        "the chained call must have run against the supplied value, not the resolver's"
+    );
+}
+
+#[test]
+fn a_position_is_resolved_at_most_once_across_chained_calls() {
+    let (program, forwarder_id, callee_id) = forwarder_over_callee();
+    let account_id = AccountId::new([7; 32]);
+    let first = vec![0xC1; 12];
+    let second = vec![0xC2; 12];
+
+    // Two chained calls at the same position. The first finds it uncovered and is resolved
+    // empty; the second must not be, because the first call's own write now covers it.
+    let instruction = forwarder_instruction(
+        None,
+        &calls_at(
+            account_id,
+            &[
+                (callee_id, data_changer_instruction(&first)),
+                (callee_id, data_changer_instruction(&second)),
+            ],
+        ),
+    );
+
+    let mut asked: Vec<Position> = Vec::new();
+    let (output, _proof) = execute_and_prove_with(
+        input_with(account_id, forwarder_id, Account::default(), instruction),
+        &program,
+        &mut |position| {
+            asked.push(position);
+            Ok(Some(Data::empty()))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(asked, vec![Position::new(account_id, callee_id)]);
+
+    let [action] = <[_; 1]>::try_from(output.public_actions).unwrap();
+    assert_eq!(
+        action.post.shards[&callee_id],
+        Data::try_from(second).unwrap()
+    );
+}
+
+#[test]
+fn a_write_at_an_account_nothing_handed_the_root_is_never_resolved_over() {
+    let forwarder = crate::test_methods::namespace_forwarder();
+    let echo = crate::test_methods::noop();
+    let forwarder_id: AccountId = forwarder.id().into();
+    let echo_id: AccountId = echo.id().into();
+    let program = ProgramWithDependencies::new(forwarder, forwarder_id, [(echo_id, echo)].into());
+
+    let account_id = AccountId::new([7; 32]);
+    let fresh_id = AccountId::new([8; 32]);
+    let written = vec![0xA1; 12];
+
+    // The private path puts no `Undeclared` gate between a root and the accounts it names: the
+    // circuit derives the root's positions from its own output, so `fresh` enters the
+    // transaction through an output diff alone and never through a mention. A caller tracking
+    // the positions it fetched for cannot see that, which is why coverage cannot live there.
+    let instruction = forwarder_instruction(
+        Some((fresh_id, &written)),
+        &[(
+            echo_id,
+            Position::new(fresh_id, forwarder_id),
+            Program::serialize_instruction(()).unwrap(),
+        )],
+    );
+
+    let mut asked: Vec<Position> = Vec::new();
+    let (output, proof) = execute_and_prove_with(
+        input_with(account_id, forwarder_id, Account::default(), instruction),
+        &program,
+        &mut |position| {
+            asked.push(position);
+            Ok(Some(Data::try_from(vec![0xEE; 12]).unwrap()))
+        },
+    )
+    .unwrap();
+
+    assert!(
+        !asked.contains(&Position::new(fresh_id, forwarder_id)),
+        "the root's own write covers the position; fetching for it would drop that write: \
+         {asked:?}"
+    );
+    assert!(proof.is_valid_for(&output));
+
+    let fresh = output
+        .public_actions
+        .iter()
+        .find(|action| action.account_id == fresh_id)
+        .expect("the fresh account must appear in the journal");
+    assert_eq!(
+        fresh.post.shards[&forwarder_id],
+        Data::try_from(written).unwrap(),
+        "the callee must have run against the root's write, not the resolver's value"
+    );
 }

@@ -1051,7 +1051,7 @@ mod tests {
         let fee = lee::FeeDeclaration::new(signer_id, 2_000_000, 0, u128::MAX >> 1);
         let message = lee::public_transaction::Message::try_new_with_fees(
             [7_u32; 8].into(),
-            vec![signer_id],
+            vec![lee::Position::balance_only(signer_id)],
             vec![0_u128.into()],
             0_u32,
             fee,
@@ -1085,7 +1085,7 @@ mod tests {
 
         let message = lee::public_transaction::Message::try_new(
             [7_u32; 8].into(),
-            vec![signer_id],
+            vec![lee::Position::balance_only(signer_id)],
             vec![0_u128.into()],
             0_u32,
         )

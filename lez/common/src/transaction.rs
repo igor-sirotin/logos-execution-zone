@@ -479,8 +479,8 @@ mod tests {
 
     #[test]
     fn a_restricted_system_account_is_not_a_valid_reward_target() {
-        // A plain account is a fine reward target, claimed or not — a producer
-        // picks its own payout account.
+        // A plain account is a fine reward target — a producer picks its own
+        // payout account.
         validate_reward_target(AccountId::new([1; 32]))
             .expect("an ordinary account is a valid reward target");
 
