@@ -12,18 +12,18 @@ use kameo::{
 };
 use lee_core::{
     BlockId, CommitmentSetDigest, MembershipProof,
-    account::{Balance, Nonce},
+    account::{AccountView, Balance, Nonce},
 };
 
 use crate::{
     ExecutorActorTrait, Result,
     error::Error,
     protocol::{
-        FeeStateQuote, GetAccount, GetAccountBalance, GetAccountNonces, GetAccountReply, GetBlock,
-        GetBlockRange, GetChannelId, GetChannelIdReply, GetCrossZoneDeadLetters,
-        GetCrossZoneDeadLettersReply, GetFeeQuote, GetLastBlockId, GetProofsAndRoot,
-        GetTransaction, ProduceBlock, RequeueCrossZoneDeadLetter, RequeueCrossZoneDeadLetterReply,
-        Transaction,
+        FeeStateQuote, GetAccount, GetAccountBalance, GetAccountNonces, GetAccountReply,
+        GetAccountView, GetBlock, GetBlockRange, GetChannelId, GetChannelIdReply,
+        GetCrossZoneDeadLetters, GetCrossZoneDeadLettersReply, GetFeeQuote, GetLastBlockId,
+        GetProofsAndRoot, GetTransaction, ProduceBlock, RequeueCrossZoneDeadLetter,
+        RequeueCrossZoneDeadLetterReply, Transaction,
     },
 };
 
@@ -88,6 +88,12 @@ mockall::mock! {
             msg: GetAccount,
             ctx: &mut Context<Self, GetAccountReply>
         ) -> GetAccountReply;
+
+        pub fn handle_get_account_view(
+            &mut self,
+            msg: GetAccountView,
+            ctx: &mut Context<Self, (Nonce, AccountView)>
+        ) -> (Nonce, AccountView);
 
         pub fn handle_get_channel_id(
             &mut self,
@@ -279,6 +285,18 @@ impl Message<GetAccount> for MockExecutorActor {
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.handle_get_account(msg, ctx)
+    }
+}
+
+impl Message<GetAccountView> for MockExecutorActor {
+    type Reply = (Nonce, AccountView);
+
+    async fn handle(
+        &mut self,
+        msg: GetAccountView,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.handle_get_account_view(msg, ctx)
     }
 }
 

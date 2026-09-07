@@ -5,7 +5,7 @@ pub use jsonrpsee::types::ErrorObjectOwned;
 #[cfg(feature = "client")]
 pub use jsonrpsee::{core::ClientError, http_client::HttpClientBuilder as SequencerClientBuilder};
 use sequencer_service_protocol::{
-    Account, AccountId, Block, BlockId, ChannelId, Commitment, CommitmentSetDigest,
+    Account, AccountId, AccountView, Block, BlockId, ChannelId, Commitment, CommitmentSetDigest,
     CrossZoneDeadLetterReport, CrossZoneDeadLetterRequeue, FeeStateQuote, HashType, LeeTransaction,
     MembershipProof, Nonce, ProgramId,
 };
@@ -80,6 +80,15 @@ pub trait Rpc {
         &self,
         account_ids: Vec<AccountId>,
     ) -> Result<Vec<Nonce>, ErrorObjectOwned>;
+
+    // Bounded to at most one namespace's shard, unlike `getAccount`: an account any
+    // program may write a shard at can exceed the response size limit.
+    #[method(name = "getAccountView")]
+    async fn get_account_view(
+        &self,
+        account_id: AccountId,
+        namespace: Option<AccountId>,
+    ) -> Result<(Nonce, AccountView), ErrorObjectOwned>;
 
     #[method(name = "getProofsAndRoot")]
     async fn get_proofs_and_root(

@@ -14,7 +14,7 @@ use kameo::{
 };
 use lee_core::{
     BlockId,
-    account::{Balance, Nonce},
+    account::{AccountView, Balance, Nonce},
 };
 use log::{info, warn};
 use mempool::MemPoolHandle;
@@ -32,11 +32,11 @@ use crate::{
     ExecutorActorTrait, Result,
     error::Error,
     protocol::{
-        FeeStateQuote, GetAccount, GetAccountBalance, GetAccountNonces, GetAccountReply, GetBlock,
-        GetBlockRange, GetChannelId, GetChannelIdReply, GetCrossZoneDeadLetters,
-        GetCrossZoneDeadLettersReply, GetFeeQuote, GetLastBlockId, GetProofsAndRoot,
-        GetTransaction, ProduceBlock, RequeueCrossZoneDeadLetter, RequeueCrossZoneDeadLetterReply,
-        Transaction,
+        FeeStateQuote, GetAccount, GetAccountBalance, GetAccountNonces, GetAccountReply,
+        GetAccountView, GetBlock, GetBlockRange, GetChannelId, GetChannelIdReply,
+        GetCrossZoneDeadLetters, GetCrossZoneDeadLettersReply, GetFeeQuote, GetLastBlockId,
+        GetProofsAndRoot, GetTransaction, ProduceBlock, RequeueCrossZoneDeadLetter,
+        RequeueCrossZoneDeadLetterReply, Transaction,
     },
 };
 
@@ -477,6 +477,33 @@ impl<S: StorageActorTrait, BP: BlockPublisherTrait + Send + Sync + 'static> Mess
                 .with_state(|state| state.get_account_by_id(account_id))
                 .await,
         }
+    }
+}
+
+impl<S: StorageActorTrait, BP: BlockPublisherTrait + Send + Sync + 'static> Message<GetAccountView>
+    for ExecutorActor<S, BP>
+{
+    type Reply = (Nonce, AccountView);
+
+    async fn handle(
+        &mut self,
+        GetAccountView {
+            account_id,
+            namespace,
+        }: GetAccountView,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        // Projected from a borrow: cloning the account first would copy every shard,
+        // which is what the caller is asking not to be sent.
+        self.sequencer
+            .with_state(|state| {
+                state
+                    .get_account_by_id_ref(account_id)
+                    .map_or_else(Default::default, |account| {
+                        (account.nonce, account.project(namespace))
+                    })
+            })
+            .await
     }
 }
 

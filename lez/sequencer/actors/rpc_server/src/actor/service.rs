@@ -14,7 +14,7 @@ use log::{error, warn};
 use sequencer_core::gossip::GossipTxPublisher;
 use sequencer_executor_actor::ExecutorActorTrait;
 use sequencer_service_protocol::{
-    Account, AccountId, Block, BlockId, ChannelId, Commitment, CommitmentSetDigest,
+    Account, AccountId, AccountView, Block, BlockId, ChannelId, Commitment, CommitmentSetDigest,
     CrossZoneDeadLetter, CrossZoneDeadLetterReport, CrossZoneDeadLetterRequeue, FeeStateQuote,
     HashType, MembershipProof, Nonce, ProgramId,
 };
@@ -192,6 +192,20 @@ impl<E: ExecutorActorTrait> sequencer_service_rpc::RpcServer for Service<E> {
     ) -> Result<Vec<Nonce>, ErrorObjectOwned> {
         self.executor_ref
             .ask(sequencer_executor_actor::protocol::GetAccountNonces { account_ids })
+            .await
+            .map_err(map_infallible_error)
+    }
+
+    async fn get_account_view(
+        &self,
+        account_id: AccountId,
+        namespace: Option<AccountId>,
+    ) -> Result<(Nonce, AccountView), ErrorObjectOwned> {
+        self.executor_ref
+            .ask(sequencer_executor_actor::protocol::GetAccountView {
+                account_id,
+                namespace,
+            })
             .await
             .map_err(map_infallible_error)
     }

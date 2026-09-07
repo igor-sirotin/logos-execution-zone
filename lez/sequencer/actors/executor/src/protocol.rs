@@ -114,6 +114,11 @@ pub struct GetAccount {
     pub account_id: AccountId,
 }
 
+pub struct GetAccountView {
+    pub account_id: AccountId,
+    pub namespace: Option<AccountId>,
+}
+
 #[derive(Reply)]
 pub struct GetAccountReply {
     pub account: Account,
