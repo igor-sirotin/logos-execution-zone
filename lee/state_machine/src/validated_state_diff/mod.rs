@@ -691,8 +691,8 @@ impl ValidatedStateDiff {
     /// Used by callers (e.g. the sequencer) to inspect the diff before committing it, for example
     /// to enforce that system accounts are not modified by user transactions.
     #[must_use]
-    pub fn public_diff(&self) -> HashMap<AccountId, Account> {
-        self.0.public_diff.clone()
+    pub const fn public_diff(&self) -> &HashMap<AccountId, Account> {
+        &self.0.public_diff
     }
 
     pub(crate) fn into_state_diff(self) -> StateDiff {

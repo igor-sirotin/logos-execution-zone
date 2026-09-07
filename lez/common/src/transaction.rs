@@ -433,7 +433,7 @@ pub fn validate_bridge_account_modification(
 ) -> Result<(), lee::error::LeeError> {
     let bridge_account_id = system_accounts::bridge_account_id();
     let pre = state.get_account_by_id(bridge_account_id);
-    let Some(post) = diff.public_diff().get(&bridge_account_id).cloned() else {
+    let Some(post) = diff.public_diff().get(&bridge_account_id) else {
         return Ok(());
     };
 
@@ -443,7 +443,7 @@ pub fn validate_bridge_account_modification(
         )));
     }
 
-    if bridge_balance_only_increased(&pre, &post) {
+    if bridge_balance_only_increased(&pre, post) {
         Ok(())
     } else {
         Err(lee::error::LeeError::InvalidInput(format!(

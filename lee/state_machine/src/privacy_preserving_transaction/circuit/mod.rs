@@ -321,13 +321,15 @@ pub fn execute_and_prove_with(
             }
         }
 
-        // TODO: remove clone
-        program_outputs.push(program_output.clone());
+        // Metadata only: the stored output must stay intact, since the circuit derives the call
+        // tree from it.
+        let new_calls = program_output.chained_calls.clone();
+        program_outputs.push(program_output);
 
         // Prove circuit.
         env_builder.add_assumption(inner_receipt);
 
-        for new_call in program_output.chained_calls.into_iter().rev() {
+        for new_call in new_calls.into_iter().rev() {
             let next_program = dependencies.get(&new_call.program_account_id).ok_or(
                 InvalidProgramBehaviorError::UndeclaredProgramDependency {
                     program_account_id: new_call.program_account_id,
