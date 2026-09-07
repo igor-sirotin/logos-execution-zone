@@ -1,4 +1,4 @@
-use std::{fmt::Display, str::FromStr};
+use std::{collections::BTreeMap, fmt::Display, str::FromStr};
 
 use base58::{FromBase58 as _, ToBase58 as _};
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 
-use crate::NullifierSecretKey;
+use crate::{NullifierSecretKey, program::ShardStateDiff};
 
 pub mod data;
 
@@ -112,52 +112,193 @@ pub enum BalanceDiffError {
     InsufficientBalance,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
-pub struct PostStateEffects {
-    pub id: AccountId,
-    pub diff_balance: Option<BalanceDiff>,
-    pub new_data: Option<Data>,
-}
-
-impl PostStateEffects {
-    /// A diff that leaves `id`'s balance and data untouched.
-    #[must_use]
-    pub const fn new_unchanged(id: AccountId) -> Self {
-        Self {
-            id,
-            diff_balance: None,
-            new_data: None,
-        }
-    }
-}
-
 /// Account to be used both in public and private contexts.
+///
+/// `shards` is a `BTreeMap` and an emptied shard is always removed, so equal accounts always
+/// encode identically — the encoding is what every commitment and note is taken over.
 #[derive(
     Debug, Default, Clone, Eq, PartialEq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
 pub struct Account {
-    pub program_owner: AccountId,
     pub balance: Balance,
-    pub data: Data,
     pub nonce: Nonce,
+    pub shards: BTreeMap<AccountId, Data>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
-pub struct AccountWithMetadata {
-    pub account: Account,
-    pub is_authorized: bool,
-    pub account_id: AccountId,
-}
+impl Account {
+    #[must_use]
+    pub fn shard(&self, program: AccountId) -> &Data {
+        const EMPTY: &Data = &Data::empty();
+        self.shards.get(&program).unwrap_or(EMPTY)
+    }
 
-#[cfg(feature = "host")]
-impl AccountWithMetadata {
-    pub fn new(account: Account, is_authorized: bool, account_id: impl Into<AccountId>) -> Self {
-        Self {
-            account,
-            is_authorized,
-            account_id: account_id.into(),
+    pub fn set_shard(&mut self, program: AccountId, data: Data) {
+        if data.is_empty() {
+            self.shards.remove(&program);
+        } else {
+            self.shards.insert(program, data);
         }
     }
+
+    #[must_use]
+    pub fn with_shard(mut self, program: AccountId, data: Data) -> Self {
+        self.set_shard(program, data);
+        self
+    }
+
+    pub fn splice(&mut self, diff: &ShardStateDiff) -> Result<(), BalanceDiffError> {
+        self.balance = apply_balance_diff(diff.pre.balance, Some(diff.post_balance_diff))?;
+        if let Some((program, pre_data)) = &diff.pre.shard {
+            self.set_shard(
+                *program,
+                diff.post_data.clone().unwrap_or_else(|| pre_data.clone()),
+            );
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn project(&self, namespaces: impl IntoIterator<Item = AccountId>) -> AccountView {
+        AccountView {
+            balance: self.balance,
+            shards: namespaces
+                .into_iter()
+                .map(|namespace| (namespace, self.shard(namespace).clone()))
+                .collect(),
+        }
+    }
+
+    pub fn apply(&mut self, view: &AccountView) {
+        self.balance = view.balance;
+        for (namespace, data) in &view.shards {
+            self.set_shard(*namespace, data.clone());
+        }
+    }
+}
+
+/// What a message names: an account, and optionally one program's namespace at it.
+/// Authorization is account-granular — a signature over the account authorizes its balance and
+/// every namespace at it.
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
+pub struct Position {
+    pub account_id: AccountId,
+    pub program: Option<AccountId>,
+}
+
+impl Position {
+    #[must_use]
+    pub const fn new(account_id: AccountId, program: AccountId) -> Self {
+        Self {
+            account_id,
+            program: Some(program),
+        }
+    }
+
+    #[must_use]
+    pub const fn balance_only(account_id: AccountId) -> Self {
+        Self {
+            account_id,
+            program: None,
+        }
+    }
+}
+
+/// One position as handed to a guest: the account's shared balance plus the named shard, and
+/// nothing else of the account.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct Input {
+    pub account_id: AccountId,
+    pub is_authorized: bool,
+    pub balance: Balance,
+    pub shard: Option<(AccountId, Data)>,
+}
+
+impl Input {
+    #[must_use]
+    pub const fn named(
+        account_id: AccountId,
+        is_authorized: bool,
+        balance: Balance,
+        program: AccountId,
+        data: Data,
+    ) -> Self {
+        Self {
+            account_id,
+            is_authorized,
+            balance,
+            shard: Some((program, data)),
+        }
+    }
+
+    #[must_use]
+    pub const fn balance_only(
+        account_id: AccountId,
+        is_authorized: bool,
+        balance: Balance,
+    ) -> Self {
+        Self {
+            account_id,
+            is_authorized,
+            balance,
+            shard: None,
+        }
+    }
+
+    #[must_use]
+    pub fn at(position: Position, is_authorized: bool, account: &Account) -> Self {
+        Self {
+            account_id: position.account_id,
+            is_authorized,
+            balance: account.balance,
+            shard: position
+                .program
+                .map(|program| (program, account.shard(program).clone())),
+        }
+    }
+
+    #[must_use]
+    pub fn namespace(&self) -> Option<AccountId> {
+        self.shard.as_ref().map(|(program, _)| *program)
+    }
+
+    /// The named shard, checked to be `program`'s, so a guest handed another namespace reads an
+    /// error rather than an empty shard.
+    #[must_use]
+    pub fn shard_of(&self, program: AccountId) -> &Data {
+        let (named, data) = self.shard.as_ref().expect("Position names no shard");
+        assert_eq!(*named, program, "Position names another namespace");
+        data
+    }
+}
+
+impl From<&Input> for Position {
+    fn from(input: &Input) -> Self {
+        Self {
+            account_id: input.account_id,
+            program: input.namespace(),
+        }
+    }
+}
+
+/// An account minus its nonce, restricted to the namespaces a transaction touched. A touched
+/// namespace the account never held is present here, holding empty [`Data`].
+#[derive(
+    Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+pub struct AccountView {
+    pub balance: Balance,
+    pub shards: BTreeMap<AccountId, Data>,
 }
 
 #[derive(
@@ -169,10 +310,11 @@ impl AccountWithMetadata {
     PartialEq,
     Eq,
     Hash,
+    PartialOrd,
+    Ord,
     BorshSerialize,
     BorshDeserialize,
 )]
-#[cfg_attr(any(feature = "host", test), derive(PartialOrd, Ord))]
 pub struct AccountId {
     value: [u8; 32],
 }

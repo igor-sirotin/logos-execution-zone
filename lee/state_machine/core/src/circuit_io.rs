@@ -3,7 +3,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use crate::{
     AuthorizationSecretKey, Commitment, CommitmentSetDigest, Identifier, MembershipProof,
     Nullifier, NullifierPublicKey, NullifierSecretKey,
-    account::{Account, AccountId, AccountWithMetadata},
+    account::{Account, AccountId, AccountView, Position},
     encryption::{EncryptedAccountData, ViewTag, ViewingPublicKey},
     program::{BlockValidityWindow, PdaSeed, ProgramId, ProgramOutput, TimestampValidityWindow},
 };
@@ -28,37 +28,26 @@ pub struct ProgramImageClaim {
 pub struct PrivacyPreservingCircuitInput {
     /// Outputs of the program execution.
     pub program_outputs: Vec<ProgramOutput>,
-    /// One entry per `pre_state`, in the same order as the program's `pre_states`.
-    /// Length must equal the number of `pre_states` derived from `program_outputs`.
-    /// The guest's `private_pda_by_position` and `private_pda_bound_positions`
-    /// rely on this position alignment.
-    pub account_identities: Vec<InputAccountIdentity>,
+    /// One witness per private account in the call graph. A position is private exactly when its
+    /// `account_id` is some witness's [`PrivateWitness::account_id`]; nothing else marks it.
+    pub private_witnesses: Vec<PrivateWitness>,
     /// The top-level call's own dispatch address.
     pub program_account_id: AccountId,
     pub dummy_inputs: Vec<DummyInput>,
-    /// `account_id`s the top-level call was invoked with. Every one must still appear somewhere
-    /// in the final accumulated pre-states, or the guest rejects — catches a chained call
-    /// silently dropping an account from its own output.
-    pub initial_pre_states: Vec<AccountId>,
+    /// Positions the top-level call was invoked with. Every one must still appear somewhere in
+    /// the final accumulated pre-states, or the guest rejects — catches a chained call silently
+    /// dropping a position from its own output.
+    pub initial_positions: Vec<Position>,
     /// Real `image_id`s for every address-deployed program invoked in the call graph, keyed by
     /// account id. See [`ProgramImageClaim`].
     pub program_image_claims: Vec<ProgramImageClaim>,
 }
 
 #[derive(Clone, BorshSerialize, BorshDeserialize)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Private carries the ML-KEM viewing key and dominates; boxing it would add a guest heap allocation per witness, and the footprint matches the pre-refactor enum"
-)]
-pub enum InputAccountIdentity {
-    /// Public account. The guest reads pre/post state from `program_outputs` and emits no
-    /// commitment, ciphertext, or nullifier.
-    Public,
-    Private(PrivateWitness),
-}
-
-#[derive(Clone, BorshSerialize, BorshDeserialize)]
 pub struct PrivateWitness {
+    /// The whole committed pre-account. A guest is handed only the positions it named, so the
+    /// untouched shards reach the commitment through here and nowhere else.
+    pub account: Account,
     pub vpk: ViewingPublicKey,
     pub random_seed: [u8; 32],
     pub identifier: Identifier,
@@ -73,18 +62,9 @@ pub enum WitnessKind {
     /// `pre_state.account_id`. An honest authorized account's `npk` for Id computation gets
     /// derived from the supplied `ask`.
     Regular { ask: Option<AuthorizationSecretKey> },
-    /// Private PDA. The npk-to-account_id binding is proven upstream via the `binding` below or a
-    /// caller's `pda_seeds` match. The identifier diversifies the PDA within the
-    /// `(program_account_id, seed, npk)` family: `AccountId::for_private_pda` uses it as the 4th
-    /// input.
-    Pda {
-        /// When `Some((authority_account_id, seed))`, the circuit binds this position via the
-        /// external derivation check
-        /// `AccountId::for_private_pda(authority_account_id, seed, npk, vpk, identifier) ==
-        /// pre_state.account_id` rather than requiring a caller's `pda_seeds` to establish the
-        /// binding.
-        binding: Option<(AccountId, PdaSeed)>,
-    },
+    /// Private PDA. The `binding` establishes the address's identity; a caller's `pda_seeds` only
+    /// grant consent to mutate it.
+    Pda { binding: (AccountId, PdaSeed) },
 }
 
 #[derive(Clone, BorshSerialize, BorshDeserialize)]
@@ -119,36 +99,37 @@ pub struct DummyInput {
     pub commitment_root: CommitmentSetDigest,
 }
 
-impl InputAccountIdentity {
+impl PrivateWitness {
     #[must_use]
-    pub const fn is_public(&self) -> bool {
-        matches!(self, Self::Public)
+    pub const fn is_pda(&self) -> bool {
+        matches!(self.kind, WitnessKind::Pda { .. })
     }
 
     #[must_use]
-    pub const fn is_private_pda(&self) -> bool {
-        matches!(
-            self,
-            Self::Private(PrivateWitness {
-                kind: WitnessKind::Pda { .. },
-                ..
-            })
-        )
+    pub const fn pda_binding(&self) -> Option<(AccountId, PdaSeed)> {
+        match self.kind {
+            WitnessKind::Pda { binding } => Some(binding),
+            WitnessKind::Regular { .. } => None,
+        }
     }
 
     #[must_use]
-    pub fn npk_vpk_if_private_pda(
-        &self,
-    ) -> Option<(NullifierPublicKey, ViewingPublicKey, Identifier)> {
-        match self {
-            Self::Private(PrivateWitness {
-                vpk,
-                identifier,
-                kind: WitnessKind::Pda { .. },
-                nullifier,
-                ..
-            }) => Some((nullifier.npk(), vpk.clone(), *identifier)),
-            Self::Public | Self::Private(_) => None,
+    pub fn npk_vpk_identifier(&self) -> (NullifierPublicKey, ViewingPublicKey, Identifier) {
+        (self.nullifier.npk(), self.vpk.clone(), self.identifier)
+    }
+
+    /// The address this witness claims, derived from the keys it carries — the only thing that
+    /// makes a position private.
+    #[must_use]
+    pub fn account_id(&self) -> AccountId {
+        let (npk, vpk, identifier) = self.npk_vpk_identifier();
+        match self.kind {
+            WitnessKind::Regular { .. } => {
+                AccountId::for_regular_private_account(&npk, &vpk, identifier)
+            }
+            WitnessKind::Pda {
+                binding: (program, seed),
+            } => AccountId::for_private_pda(&program, &seed, &npk, &vpk, identifier),
         }
     }
 }
@@ -178,11 +159,15 @@ pub struct PrivateAction {
     pub encrypted_post_state: EncryptedAccountData,
 }
 
+/// One public account's whole-transaction effect: `pre` holds its balance and each touched
+/// namespace's data at their respective first sights, `post` the finals over the same key set.
 #[derive(BorshSerialize, BorshDeserialize)]
 #[cfg_attr(any(feature = "host", test), derive(Debug, PartialEq, Eq))]
 pub struct PublicAction {
-    pub pre: AccountWithMetadata,
-    pub post: Account,
+    pub account_id: AccountId,
+    pub is_authorized: bool,
+    pub pre: AccountView,
+    pub post: AccountView,
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
