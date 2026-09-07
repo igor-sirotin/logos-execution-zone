@@ -26,12 +26,12 @@ impl Amm<'_> {
         let token_program_id: AccountId = programs::token().id().into();
         let user_a_acc = self
             .0
-            .get_account_public(a_id)
+            .get_account_view(a_id, Some(token_program_id))
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
         let user_b_acc = self
             .0
-            .get_account_public(b_id)
+            .get_account_view(b_id, Some(token_program_id))
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
 
@@ -95,12 +95,12 @@ impl Amm<'_> {
         let token_program_id: AccountId = programs::token().id().into();
         let user_a_acc = self
             .0
-            .get_account_public(a_id)
+            .get_account_view(a_id, Some(token_program_id))
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
         let user_b_acc = self
             .0
-            .get_account_public(b_id)
+            .get_account_view(b_id, Some(token_program_id))
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
 
@@ -181,12 +181,12 @@ impl Amm<'_> {
         let token_program_id: AccountId = programs::token().id().into();
         let user_a_acc = self
             .0
-            .get_account_public(a_id)
+            .get_account_view(a_id, Some(token_program_id))
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
         let user_b_acc = self
             .0
-            .get_account_public(b_id)
+            .get_account_view(b_id, Some(token_program_id))
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
 
@@ -268,12 +268,12 @@ impl Amm<'_> {
         let token_program_id: AccountId = programs::token().id().into();
         let user_a_acc = self
             .0
-            .get_account_public(a_id)
+            .get_account_view(a_id, Some(token_program_id))
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
         let user_b_acc = self
             .0
-            .get_account_public(b_id)
+            .get_account_view(b_id, Some(token_program_id))
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
 
@@ -331,12 +331,12 @@ impl Amm<'_> {
         let token_program_id: AccountId = programs::token().id().into();
         let user_a_acc = self
             .0
-            .get_account_public(user_holding_a)
+            .get_account_view(user_holding_a, Some(token_program_id))
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
         let user_b_acc = self
             .0
-            .get_account_public(user_holding_b)
+            .get_account_view(user_holding_b, Some(token_program_id))
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
 

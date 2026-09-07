@@ -304,7 +304,7 @@ impl AccountManager {
             let kind = match identity {
                 AccountIdentity::Public(account_id) => {
                     let account = wallet
-                        .get_account_public(account_id)
+                        .get_account_view(account_id, namespace)
                         .await
                         .map_err(ExecutionFailureKind::SequencerError)?;
 
@@ -319,7 +319,7 @@ impl AccountManager {
                 }
                 AccountIdentity::PublicNoSign(account_id) => {
                     let account = wallet
-                        .get_account_public(account_id)
+                        .get_account_view(account_id, namespace)
                         .await
                         .map_err(ExecutionFailureKind::SequencerError)?;
 
@@ -336,7 +336,7 @@ impl AccountManager {
                     key_path,
                 } => {
                     let account = wallet
-                        .get_account_public(account_id)
+                        .get_account_view(account_id, namespace)
                         .await
                         .map_err(ExecutionFailureKind::SequencerError)?;
 

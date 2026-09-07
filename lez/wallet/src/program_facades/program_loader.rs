@@ -56,7 +56,7 @@ impl ProgramLoader<'_> {
 
         let payer_account = self
             .0
-            .get_account_public(payer)
+            .get_account_view(payer, None)
             .await
             .map_err(ExecutionFailureKind::SequencerError)?;
         let payer_key = self
@@ -113,7 +113,7 @@ impl ProgramLoader<'_> {
         if let Some(next_segment_id) = next_segment {
             let next_segment_acc = self
                 .0
-                .get_account_public(next_segment_id)
+                .get_account_view(next_segment_id, Some(PROGRAM_LOADER_ACCOUNT_ID))
                 .await
                 .map_err(ExecutionFailureKind::SequencerError)?;
             if program_loader_core::ProgramSegment::from_bytes(
@@ -310,7 +310,7 @@ impl ProgramLoader<'_> {
             }
             let account = self
                 .0
-                .get_account_public(id)
+                .get_account_view(id, Some(PROGRAM_LOADER_ACCOUNT_ID))
                 .await
                 .with_context(|| format!("failed to fetch segment account {id}"))?;
             let segment = program_loader_core::ProgramSegment::from_bytes(

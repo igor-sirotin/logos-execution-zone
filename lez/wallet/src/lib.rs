@@ -609,6 +609,30 @@ impl WalletCore {
             .await?)
     }
 
+    // Only the nonce, the balance and the one namespace `namespace` names, for a caller
+    // that reads no other shard: any program may write a shard at any account, so the
+    // whole account is not a bounded response.
+    pub async fn get_account_view(
+        &self,
+        account_id: AccountId,
+        namespace: Option<AccountId>,
+    ) -> Result<Account> {
+        let (nonce, view) = self
+            .multi_sequencer_client
+            .metered_get(async |client: &SequencerClient| {
+                client.get_account_view(account_id, namespace).await
+            })
+            .await?;
+
+        let mut account = Account {
+            nonce,
+            ..Default::default()
+        };
+        account.apply(&view);
+
+        Ok(account)
+    }
+
     pub async fn get_account(&self, account_id: AccountIdWithPrivacy) -> Result<Account> {
         match account_id {
             AccountIdWithPrivacy::Public(acc_id) => self.get_account_public(acc_id).await,

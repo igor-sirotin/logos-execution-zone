@@ -201,7 +201,9 @@ impl AtaSubcommand {
                 &ata_program_id,
                 &associated_token_account_core::compute_ata_seed(owner, *def, token_program_id),
             );
-            let account = wallet_core.get_account_public(ata_id).await?;
+            let account = wallet_core
+                .get_account_view(ata_id, Some(token_program_id))
+                .await?;
             let holding = account.shard(token_program_id);
 
             if holding.is_empty() {
